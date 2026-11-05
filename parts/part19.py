@@ -53,7 +53,7 @@ before editing.
 
 ## Plan directories are not projects
 
-`asn1core/`, `certledger/` and `keyproof/` hold plans, trust models and
+`certledger/` and `keyproof/` hold plans, trust models and
 conformance-corpus specifications. They have no package, no `pyproject.toml` and no test
 suite, so **there is no command in them that will run**. If a task asks for work there, the
 deliverable is a document or a decision, not scaffolding: creating a `pyproject.toml` in a

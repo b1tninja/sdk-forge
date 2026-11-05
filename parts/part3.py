@@ -1,0 +1,665 @@
+# ------------------------------------------------- clusters: QUIC tunnels and service discovery
+
+PROJECTS_B: list[dict[str, Any]] = [
+    {
+        "name": "h3tunnel",
+        "pkg": "h3tunnel",
+        "title": "h3tunnel -- CONNECT-UDP and CONNECT-IP in Python",
+        "desc": "MASQUE tunnels: HTTP Datagrams and the Capsule Protocol, CONNECT-UDP and "
+        "CONNECT-IP clients, and the proxy side that terminates them",
+        "kw": [
+            "masque",
+            "connect-udp",
+            "connect-ip",
+            "http3",
+            "quic",
+            "proxy",
+            "rfc9298",
+            "rfc9484",
+        ],
+        "why": (
+            "MASQUE is how UDP is proxied over HTTP today, and Python cannot speak it. The "
+            "closest thing on PyPI is pymasque (0.1.2, 2026-11-04), which implements Cloudflare "
+            "WARP's undocumented L4 mode from a gist: TCP only, client only, no proxy side, and "
+            "compliant with neither RFC 9298 nor RFC 9484. The transport problem is already "
+            "solved twice over, since aioquic 1.7.2 (2026-11-02) and qh3 2.1.0 (2026-10-25) "
+            "both ship sans-IO and asyncio APIs with QUIC DATAGRAM support. What is missing is "
+            "precisely the layer above them: capsules, context identifiers and the two CONNECT "
+            "profiles. h3tunnel keeps that layer sans-IO, so it is testable with no QUIC stack "
+            "at all and the transport stays an adapter.",
+        ),
+        "docs": [
+            {
+                "n": "9297",
+                "status": "Proposed Standard",
+                "date": "2022-08",
+                "why": "HTTP Datagrams and the Capsule Protocol, the framing everything else uses",
+            },
+            {
+                "n": "9298",
+                "status": "Proposed Standard",
+                "date": "2022-08",
+                "why": "CONNECT-UDP: request syntax, context identifiers, proxy behaviour",
+            },
+            {
+                "n": "9484",
+                "status": "Proposed Standard",
+                "date": "2023-10",
+                "why": "CONNECT-IP: whole IP packets through the same tunnel",
+            },
+            {
+                "n": "9221",
+                "status": "Proposed Standard",
+                "date": "2022-03",
+                "why": "the QUIC DATAGRAM extension HTTP Datagrams ride on",
+            },
+            {
+                "n": "9114",
+                "status": "Proposed Standard",
+                "date": "2022-06",
+                "why": "HTTP/3 stream and setting rules the tunnels live inside",
+            },
+            {
+                "n": "9220",
+                "status": "Proposed Standard",
+                "date": "2022-06",
+                "why": "extended CONNECT over HTTP/3, the pattern this reuses",
+            },
+            {
+                "n": "9931",
+                "status": "Proposed Standard",
+                "date": "2025-09",
+                "why": "what may be sent optimistically before the response arrives",
+            },
+        ],
+        "errata": [
+            "RFC 9484 verified erratum 8444, sec. 4.6: the wildcard value for target and ipproto MUST be percent-encoded, so it travels as %2A. Examples in sec. 4.2 and 4.4 are corrected too. Get this wrong and CONNECT-IP does not interoperate.",
+            "RFC 9931 updates RFC 9298 sec. 5: optimistic sending before the response is allowed in HTTP/2 and HTTP/3 but not in HTTP/1.1.",
+            "RFC 9297 and RFC 9298 report no errata as of 2026-10-29.",
+        ],
+        "prior": [
+            {
+                "name": "pymasque",
+                "version": "0.1.2",
+                "date": "2026-11-04",
+                "note": "Cloudflare WARP L4 mode only: TCP only, client only",
+            },
+            {
+                "name": "aioquic",
+                "version": "1.7.2",
+                "date": "2026-11-02",
+                "note": "the transport underneath, sans-IO plus asyncio; not a tunnel",
+            },
+            {
+                "name": "qh3",
+                "version": "2.1.0",
+                "date": "2026-10-25",
+                "note": "maintained aioquic fork, Rust core, datagrams and WebTransport",
+            },
+            {
+                "name": "connect-udp, masque-proxy, capsule",
+                "version": "-",
+                "date": "-",
+                "note": "all absent from PyPI (2026-11-05)",
+            },
+        ],
+        "gaps": [
+            "CONNECT-UDP client and proxy in one library, including the server duties of RFC 9298 sec. 3.1",
+            "CONNECT-IP with the erratum-correct URI template (RFC 9484)",
+            "the Capsule Protocol, so one tunnel works over HTTP/1.1 and HTTP/2 as well (RFC 9297)",
+            "context identifier demultiplexing under the MTU and ECN rules of RFC 9298 sec. 6",
+            "a transport-neutral core: qh3 and aioquic as adapters, never as the design centre",
+        ],
+        "nongoals": [
+            "a QUIC implementation: aioquic and qh3 already are one, and this is not a third",
+            "WARP's proprietary L4 mode or its authentication scheme",
+            "a full VPN: CONNECT-IP moves packets, it does not negotiate an address with a peer",
+        ],
+        "mods": [
+            ("capsule", "capsule framing and the registered capsule types (RFC 9297)"),
+            (
+                "httpdatagram",
+                "HTTP Datagram payload with the context identifier (RFC 9298 sec. 5)",
+            ),
+            (
+                "ctx",
+                "context identifier allocation and demultiplexing (RFC 9298 sec. 4)",
+            ),
+            (
+                "connect_udp",
+                "CONNECT-UDP request and response construction (RFC 9298 sec. 3)",
+            ),
+            ("connect_ip", "CONNECT-IP URI template and IP packet framing (RFC 9484)"),
+            (
+                "limits",
+                "MTU, ECN and optimistic-send rules (RFC 9298 sec. 6, RFC 9931)",
+            ),
+            ("sansio", "transport-neutral tunnel state machine"),
+            ("aio", "asyncio client and proxy server over a pluggable QUIC adapter"),
+        ],
+        "api": [
+            (
+                "capsule",
+                "def",
+                "encode_capsule",
+                "capsule_type: int, body: bytes",
+                "Capsule",
+                "RFC 9297",
+            ),
+            ("capsule", "def", "decode_capsule", "payload: bytes", "tuple", "RFC 9297"),
+            (
+                "httpdatagram",
+                "def",
+                "encode_datagram",
+                "context_id: int, payload: bytes",
+                "HttpDatagram",
+                "RFC 9298 sec. 5",
+            ),
+            (
+                "ctx",
+                "def",
+                "allocate_context",
+                "tunnel: Tunnel",
+                "ContextId",
+                "RFC 9298 sec. 4",
+            ),
+            (
+                "connect_udp",
+                "def",
+                "build_request",
+                "target: Target, authority: str, uri: str",
+                "ConnectRequest",
+                "RFC 9298 sec. 3",
+            ),
+            (
+                "connect_ip",
+                "def",
+                "target_uri",
+                "target: Optional[str], ipproto: Optional[str]",
+                "str",
+                "RFC 9484 sec. 4.6",
+            ),
+            (
+                "limits",
+                "def",
+                "clamp_payload",
+                "mtu: int, tunnel_overhead: int",
+                "int",
+                "RFC 9298 sec. 6.1",
+            ),
+            (
+                "sansio",
+                "def",
+                "on_datagram",
+                "data: bytes, now: float",
+                "list",
+                "RFC 9298",
+            ),
+            (
+                "aio",
+                "async def",
+                "open_udp_tunnel",
+                "proxy: str, target: tuple",
+                "UdpTunnel",
+                "RFC 9298",
+            ),
+            (
+                "aio",
+                "async def",
+                "serve_proxy",
+                "host: str, port: int, policy: ProxyPolicy",
+                "None",
+                "RFC 9298 sec. 3.1",
+            ),
+        ],
+        "steps": [
+            "M1 signed codecs first: capsule and HTTP Datagram framing against byte-exact vectors",
+            "M2 sans-IO client state machine including context identifier lifecycle",
+            "M3 asyncio client over the qh3 adapter, verified against a local proxy",
+            "M4 proxy server: RFC 9298 sec. 3.1 handling, limits, graceful teardown",
+            "M5 CONNECT-IP with erratum 8444 percent-encoding and an IP packet codec",
+            "M6 publication: 0.1.0 with an interoperability trace against a non-Python proxy",
+        ],
+        "extras": {"quic": [("qh3", "2.1")], "aioquic": [("aioquic", "1.7")]},
+        "cli": "h3tunnel udp --proxy https://proxy:4433 --listen 127.0.0.1:5354 --target 1.1.1.1:53",
+    },
+    {
+        "name": "dnssd-srp",
+        "pkg": "dnssd_srp",
+        "title": "dnssd-srp -- DNS-SD without multicast",
+        "desc": "Service Registration Protocol (SRP) requester and registrar checks, DNS Push "
+        "Notifications, and the DNS Stateful Operations session both depend on",
+        "kw": [
+            "dns-sd",
+            "srp",
+            "mdns",
+            "dso",
+            "push-notifications",
+            "rfc9665",
+            "rfc8765",
+            "rfc8490",
+        ],
+        "why": (
+            "The multicast answer to local service discovery already has a strong Python owner "
+            "(zeroconf 0.153.0, 2026-10-31) and this project does not compete with it. RFC 9665 "
+            "moved DNS-SD to unicast authenticated updates in 2025-06, and RFC 8765 gave "
+            "clients pushed record changes over a persistent stateful session. Nothing on PyPI "
+            "speaks any of RFC 9665, RFC 8765, RFC 8490 or RFC 8766. namespy, the DNS library "
+            "this is designed beside, states plainly that mDNS and DNS-SD are not spoken "
+            "anywhere in it, so the message layer can be shared while the stateful half is "
+            "built here.",
+        ),
+        "docs": [
+            {
+                "n": "9665",
+                "status": "Proposed Standard",
+                "date": "2025-06",
+                "why": "SRP: unicast DNS-SD with SIG(0) defended registrations",
+            },
+            {
+                "n": "8765",
+                "status": "Proposed Standard",
+                "date": "2020-06",
+                "why": "DNS Push Notifications for records that change",
+            },
+            {
+                "n": "8490",
+                "status": "Proposed Standard",
+                "date": "2019-03",
+                "why": "DSO: the persistent session and TLV layer both ride",
+            },
+            {
+                "n": "8766",
+                "status": "Proposed Standard",
+                "date": "2020-06",
+                "why": "discovery proxy bridging a link into unicast DNS-SD",
+            },
+            {
+                "n": "2931",
+                "status": "Proposed Standard",
+                "date": "2000-09",
+                "why": "SIG(0) request signatures that defend a registration",
+            },
+            {
+                "n": "6763",
+                "status": "Proposed Standard",
+                "date": "2013-02",
+                "why": "DNS-SD naming, plus the domain enumeration that finds a registrar",
+            },
+            {
+                "n": "6762",
+                "status": "Proposed Standard",
+                "date": "2013-02",
+                "why": "mDNS, the world a discovery proxy bridges from",
+            },
+        ],
+        "errata": [
+            "RFC 8765 verified erratum 8560, sec. 6.5: for servers that do not implement RECONFIRM it MUST be silently ignored. The published text said a NOERROR response, which RFC 8490 forbids on a unidirectional DSO message.",
+            "RFC 9665 and RFC 8490 report no errata as of 2026-10-29.",
+            "RFC 6763 is updated by RFC 8553; RFC 6762 has 2 errata on file, none verified.",
+        ],
+        "prior": [
+            {
+                "name": "zeroconf",
+                "version": "0.153.0",
+                "date": "2026-10-31",
+                "note": "the multicast responder; no SRP, no DSO, no push",
+            },
+            {
+                "name": "dnspython",
+                "version": "2.9.2",
+                "date": "2026-11-03",
+                "note": "message and DNSSEC plumbing; no stateful sessions",
+            },
+            {
+                "name": "srp",
+                "version": "1.0.22",
+                "date": "2024-11-01",
+                "note": "Secure Remote Password: an unrelated protocol wearing this acronym",
+            },
+            {
+                "name": "dnssd-srp, srpkit, srpd, discovery-proxy",
+                "version": "-",
+                "date": "-",
+                "note": "all absent from PyPI (2026-11-05)",
+            },
+        ],
+        "gaps": [
+            "SRP update construction and the registrar-side validation of RFC 9665 sec. 3.3",
+            "TTL consistency and lease maintenance rules, RFC 9665 sec. 4 and sec. 5",
+            "SIG(0) signing with the algorithm RFC 9665 sec. 6.6 requires",
+            "DSO session management: keepalive, idle timeout and padding (RFC 8490)",
+            "push notification subscriptions (RFC 8765) and a discovery proxy front (RFC 8766)",
+        ],
+        "nongoals": [
+            "an mDNS responder: zeroconf owns the multicast link",
+            "a recursive resolver, which is what namespy is",
+            "a full DNS server: the registrar half is the update path, not a zone implementation",
+        ],
+        "mods": [
+            ("dso", "DSO message and TLV codec, session timers (RFC 8490)"),
+            (
+                "session",
+                "stream transport, keepalive, idle timeout, padding (RFC 8490)",
+            ),
+            ("srp", "SRP update construction (RFC 9665 sec. 3)"),
+            (
+                "registrar",
+                "update validation and lease maintenance (RFC 9665 sec. 3.3, sec. 4, sec. 5)",
+            ),
+            ("sig0", "SIG(0) sign and verify (RFC 2931, RFC 9665 sec. 6.6)"),
+            ("push", "subscribe and replay protection (RFC 8765)"),
+            ("proxy", "discovery proxy data translation (RFC 8766)"),
+            (
+                "discovery",
+                "registration domain enumeration and registrar SRV lookup (RFC 6763, RFC 9665 sec. 3.1.1)",
+            ),
+        ],
+        "api": [
+            ("dso", "def", "encode_dso", "message: DsoMessage", "bytes", "RFC 8490"),
+            (
+                "session",
+                "async def",
+                "open_session",
+                "resolver: tuple",
+                "DsoSession",
+                "RFC 8490",
+            ),
+            (
+                "srp",
+                "def",
+                "build_update",
+                "service: ServiceDefinition, lease: Lease",
+                "bytes",
+                "RFC 9665 sec. 3",
+            ),
+            (
+                "sig0",
+                "def",
+                "sign",
+                "message: bytes, key: SigningKey",
+                "bytes",
+                "RFC 2931, RFC 9665 sec. 6.6",
+            ),
+            (
+                "sig0",
+                "def",
+                "verify",
+                "message: bytes, signature: bytes, key: VerifyKey",
+                "bool",
+                "RFC 2931",
+            ),
+            (
+                "registrar",
+                "def",
+                "validate_update",
+                "update: bytes, zone: ZoneContext",
+                "ValidationOutcome",
+                "RFC 9665 sec. 3.3",
+            ),
+            (
+                "registrar",
+                "def",
+                "ttl_for",
+                "lease_seconds: int",
+                "int",
+                "RFC 9665 sec. 4",
+            ),
+            (
+                "push",
+                "async def",
+                "subscribe",
+                "session: DsoSession, name: str, rrtype: str",
+                "AsyncIterator",
+                "RFC 8765",
+            ),
+            (
+                "discovery",
+                "def",
+                "registrar_from_zone",
+                "zone_apex: str",
+                "RegistrarEndpoint",
+                "RFC 9665 sec. 3.1.1",
+            ),
+        ],
+        "steps": [
+            "M1 DSO codec and session with malformed-input refusal",
+            "M2 SIG(0) sign and verify with the RFC 9665 sec. 6.6 algorithm",
+            "M3 SRP requester: lease, TTL, keep-alive and teardown",
+            "M4 registrar-side validation per RFC 9665 sec. 3.3, including the sec. 5 cleanup rules",
+            "M5 push subscriptions, with erratum 8560 RECONFIRM behaviour",
+            "M6 discovery proxy front end, then publication: 0.1.0",
+        ],
+        "extras": {"crypto": [("cryptography", "50.0.2")]},
+        "cli": "dnssd-srp register --name printer --type _printer._tcp --port 515",
+    },
+    {
+        "name": "turnkit",
+        "pkg": "turnkit",
+        "title": "turnkit -- STUN, TURN and ICE on asyncio",
+        "desc": "STUN messaging and long-term credentials, TURN allocations with permissions and "
+        "channels, and an ICE agent written to RFC 8445 with Trickle ICE and ICE PAC",
+        "kw": [
+            "stun",
+            "turn",
+            "ice",
+            "nat",
+            "webrtc",
+            "rfc8489",
+            "rfc8656",
+            "rfc8445",
+            "rfc8838",
+        ],
+        "why": (
+            "The NAT traversal stack has a Python owner, but a narrow one. aioice 0.12.1 "
+            "(2026-11-03) is written for aiortc: one ICE agent with a private TURN "
+            "implementation bolted on, and its own summary still cites RFC 5245, which RFC 8445 "
+            "obsoleted in 2018, plus RFC 8863, which changed when an agent may declare failure. "
+            "stun 1.1.0 (2026-08-01) is a message library, and pystun3 plus aiostun answer only "
+            "the NAT-type question. turnkit is the reusable half nobody has: a TURN client API "
+            "with its own allocation lifecycle, and an ICE agent whose spec anchors are the "
+            "current documents rather than the ones a 2018 codebase inherited.",
+        ),
+        "docs": [
+            {
+                "n": "8489",
+                "status": "Proposed Standard",
+                "date": "2020-02",
+                "why": "STUN: transactions, attributes, MESSAGE-INTEGRITY, FINGERPRINT",
+            },
+            {
+                "n": "8656",
+                "status": "Proposed Standard",
+                "date": "2020-02",
+                "why": "TURN: allocations, permissions, channels, the relayed path",
+            },
+            {
+                "n": "8445",
+                "status": "Proposed Standard",
+                "date": "2018-07",
+                "why": "ICE: candidate gathering, checks, nomination",
+            },
+            {
+                "n": "8838",
+                "status": "Proposed Standard",
+                "date": "2021-01",
+                "why": "Trickle ICE: incremental candidates and early checks",
+            },
+            {
+                "n": "8863",
+                "status": "Proposed Standard",
+                "date": "2021-01",
+                "why": "ICE PAC: the minimum wait before declaring failure",
+            },
+            {
+                "n": "7635",
+                "status": "Proposed Standard",
+                "date": "2015-08",
+                "why": "third-party authorization, the TURN REST credential model",
+            },
+            {
+                "n": "8016",
+                "status": "Proposed Standard",
+                "date": "2016-11",
+                "why": "allocation mobility across an address change",
+            },
+        ],
+        "errata": [
+            "RFC 8489 carries 3 verified errata.",
+            "RFC 8445 is updated by RFC 8863, and RFC 8656 is the successor to RFC 5766 and RFC 6156: do not copy recipes from either predecessor.",
+            "RFC 8838 and RFC 8863 report no errata as of 2026-10-29.",
+        ],
+        "prior": [
+            {
+                "name": "aioice",
+                "version": "0.12.1",
+                "date": "2026-11-03",
+                "note": "aiortc's ICE agent with a private TURN client; summary cites the obsoleted RFC 5245",
+            },
+            {
+                "name": "stun",
+                "version": "1.1.0",
+                "date": "2026-08-01",
+                "note": "STUN messages and attributes; no TURN or ICE",
+            },
+            {
+                "name": "aiostun",
+                "version": "0.6.1",
+                "date": "2026-01-08",
+                "note": "STUN client over UDP, TCP and TLS",
+            },
+            {
+                "name": "pyturn",
+                "version": "0.2.4.1",
+                "date": "2024-03-25",
+                "note": "test-grade STUN and TURN client",
+            },
+            {
+                "name": "turnkit, aiturn, stun-client, iceagent",
+                "version": "-",
+                "date": "-",
+                "note": "all absent from PyPI (2026-11-05)",
+            },
+        ],
+        "gaps": [
+            "a TURN client usable without importing a media stack: allocate, permission, channel, refresh",
+            "transport coverage in one place: UDP, TCP, TLS and the ALPN negotiation that picks them",
+            "an ICE agent anchored on RFC 8445 plus RFC 8838 and the RFC 8863 failure-wait rule",
+            "REST credentials per RFC 7635 and allocation mobility per RFC 8016",
+            "a sans-IO agent core so check scheduling can be tested on a virtual clock",
+        ],
+        "nongoals": [
+            "a WebRTC stack or any SDP handling",
+            "DTLS-SRTP or media of any kind: the relayed path is opaque here",
+            "a TURN server, which is an operational product rather than a client library",
+        ],
+        "mods": [
+            ("message", "STUN message, attribute and integrity codec (RFC 8489)"),
+            ("transport", "UDP, TCP and TLS transports with framing (RFC 8489)"),
+            (
+                "allocation",
+                "TURN allocate, refresh, lifetime and reallocation (RFC 8656)",
+            ),
+            ("permission", "permissions and channel bindings (RFC 8656)"),
+            (
+                "credentials",
+                "long-term credentials, nonce handling, REST tokens (RFC 8489, RFC 7635)",
+            ),
+            ("ice", "ICE agent: candidates, check scheduling, nomination (RFC 8445)"),
+            ("trickle", "incremental candidate exchange (RFC 8838)"),
+            ("sansio", "pure agent core for virtual clock testing"),
+        ],
+        "api": [
+            (
+                "message",
+                "def",
+                "encode_message",
+                "msg: StunMessage, key: Optional[bytes]",
+                "bytes",
+                "RFC 8489",
+            ),
+            (
+                "message",
+                "def",
+                "decode_message",
+                "raw: bytes",
+                "StunMessage",
+                "RFC 8489",
+            ),
+            (
+                "allocation",
+                "async def",
+                "allocate",
+                "server: Endpoint, credentials: Credentials",
+                "Allocation",
+                "RFC 8656",
+            ),
+            (
+                "allocation",
+                "async def",
+                "refresh",
+                "allocation: Allocation",
+                "Allocation",
+                "RFC 8656",
+            ),
+            (
+                "permission",
+                "def",
+                "create_permission",
+                "allocation: Allocation, peer: tuple",
+                "Permission",
+                "RFC 8656",
+            ),
+            (
+                "credentials",
+                "def",
+                "rest_credentials",
+                "username: str, secret: bytes, now: float",
+                "Credentials",
+                "RFC 7635",
+            ),
+            (
+                "ice",
+                "def",
+                "gather_candidates",
+                "interfaces: list, relay: Optional[Allocation]",
+                "list",
+                "RFC 8445",
+            ),
+            (
+                "ice",
+                "def",
+                "schedule_checks",
+                "pairs: list, state: AgentState",
+                "list",
+                "RFC 8445",
+            ),
+            (
+                "sansio",
+                "def",
+                "on_binding_response",
+                "event: Received, now: float",
+                "AgentState",
+                "RFC 8445, RFC 8863",
+            ),
+            (
+                "trickle",
+                "def",
+                "encode_end_of_candidates",
+                "component: int",
+                "bytes",
+                "RFC 8838",
+            ),
+        ],
+        "steps": [
+            "M1 STUN codec, integrity and fingerprint against published vectors",
+            "M2 transports: UDP, TCP, TLS, with framing and timeout policy",
+            "M3 TURN allocation lifecycle including 401 nonce replay and refresh",
+            "M4 permissions and channels, then RFC 8016 mobility",
+            "M5 sans-IO ICE agent with RFC 8863 failure timing, then trickle",
+            "M6 publication: 0.1.0 with a relay interoperability trace",
+        ],
+        "extras": {},
+        "cli": "turnkit allocate --server turn:example.net:3478 --rest-user u --rest-secret env:SECRET",
+    },
+]

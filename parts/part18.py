@@ -1,0 +1,11 @@
+ALL_PROJECTS = (
+    PROJECTS_A
+    + PROJECTS_B
+    + PROJECTS_C
+    + PROJECTS_D
+    + PROJECTS_E
+    + PROJECTS_F
+    + PROJECTS_G
+    + PROJECTS_H
+    + PROJECTS_I
+)

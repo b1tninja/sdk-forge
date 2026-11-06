@@ -17,6 +17,11 @@ ROOT = Path("D:/code")
 MAX_LINES = 60
 
 PROJECTS = [
+    # certledger qualifies the way the shells do (ROADMAP.md + pyproject.toml) and has real code
+    # since phase 0, so it carries the same five gates. asn1core is absent because it plans in
+    # PLAN.md/VECTORS.md and so fails qualifies(); widening that predicate is a separate decision,
+    # recorded in PORTFOLIO.md section 10.
+    "certledger",
     "rpkit",
     "rtrkit",
     "asnkit",

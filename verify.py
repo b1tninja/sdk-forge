@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tomllib
 import xml.etree.ElementTree as ET  # noqa: N817
 from pathlib import Path
 
@@ -92,6 +93,39 @@ def _text(data: str | bytes | None) -> str:
     if isinstance(data, bytes):
         return data.decode("utf-8", errors="replace")
     return data or ""
+
+
+def mypy_targets(cwd: Path, pkg: str) -> list[str]:
+    """The package and its tests: a test that calls the API wrongly is a type error mypy can see."""
+    return [pkg, "tests"] if (cwd / "tests").is_dir() else [pkg]
+
+
+def typing_warnings(cwd: Path) -> list[str]:
+    """Typing-policy findings that WARN and never FAIL (research section 5.2, rollout step 3).
+
+    They become failures by decision once the list is empty everywhere, not before: failing 30 projects at
+    once on a policy they were generated without would make the gate red for a reason nobody can act on.
+    """
+    try:
+        data = tomllib.loads((cwd / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return ["pyproject.toml does not parse"]
+    found = []
+    if data.get("tool", {}).get("mypy", {}).get("strict") is not True:
+        found.append("mypy not strict")
+    floor = data.get("project", {}).get("requires-python", "")
+    if floor and not _admits(floor, "3.12.0"):
+        found.append(f"requires-python excludes 3.12.0 ({floor})")
+    return found
+
+
+def _admits(specifier: str, version: str) -> bool:
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
+    try:
+        return SpecifierSet(specifier).contains(version)
+    except InvalidSpecifier:
+        return False
 
 
 def qualifies(name: str) -> Path | None:
@@ -205,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[tuple[str, str, str, str]] = []
     counts = {gate: {"OK": 0, "FAIL": 0} for gate in GATES}
     skipped: list[str] = []
+    warned: dict[str, list[str]] = {}
     checked = 0
 
     for name in args.project or PROJECTS:
@@ -223,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             ("ruff", ["-m", "ruff", "check", "."]),
             ("format", ["-m", "ruff", "format", "--check", "."]),
-            ("mypy", ["-m", "mypy", pkg]),
+            ("mypy", ["-m", "mypy", *mypy_targets(cwd, pkg)]),
         ]
         results = []
         for gate, cmd in specs:
@@ -234,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
             if status == "FAIL":
                 failures.append((name, gate, out, err))
         print(f"{name} " + " ".join(results), flush=True)
+        notes = typing_warnings(cwd)
+        if notes:
+            warned[name] = notes
         if junit_dir is not None:
             tests = node_ids(junit_dir / f"{name}.xml", cwd)
             records.append(
@@ -243,6 +281,7 @@ def main(argv: list[str] | None = None) -> int:
                     "sha": _git(cwd, "rev-parse", "HEAD"),
                     "dirty": bool(_git(cwd, "status", "--porcelain")),
                     "gates": {r.split("=")[0]: r.split("=")[1] for r in results},
+                    "warnings": warned.get(name, []),
                     "tests": tests,
                     "counts": {
                         o: sum(1 for x in tests if x["outcome"] == o)
@@ -260,6 +299,16 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"  skipped (missing ROADMAP.md/pyproject.toml or absent) = {', '.join(skipped)}"
         )
+
+    if warned:
+        print()
+        print("warnings (reported, never failing)")
+        kinds: dict[str, list[str]] = {}
+        for name, notes in warned.items():
+            for note in notes:
+                kinds.setdefault(note.split(" (", 1)[0], []).append(name)
+        for kind, names in kinds.items():
+            print(f"  WARN {kind} ({len(names)}): {', '.join(names)}")
 
     if failures:
         print()

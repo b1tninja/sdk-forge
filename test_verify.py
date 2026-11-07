@@ -125,3 +125,44 @@ def test_main_refuses_an_in_tree_record_before_running_anything(
     assert verify.main(["--json", str(tmp_path / "e.json")]) == 2
     assert not (tmp_path / "e.json").exists()
     assert "refusing --json" in capsys.readouterr().err
+
+
+def _project(tmp_path, pyproject: str, tests: bool = True):
+    (tmp_path / "pyproject.toml").write_text(pyproject, encoding="utf-8")
+    if tests:
+        (tmp_path / "tests").mkdir()
+    return tmp_path
+
+
+def test_mypy_is_given_the_tests_when_there_are_any(tmp_path):
+    assert verify.mypy_targets(_project(tmp_path, ""), "pkg") == ["pkg", "tests"]
+    other = tmp_path / "other"
+    other.mkdir()
+    assert verify.mypy_targets(_project(other, "", tests=False), "pkg") == ["pkg"]
+
+
+def test_typing_warnings_name_a_non_strict_config_and_an_exclusive_floor(tmp_path):
+    loose = _project(tmp_path, '[project]\nrequires-python = ">3.12"\n')
+    assert verify.typing_warnings(loose) == [
+        "mypy not strict",
+        "requires-python excludes 3.12.0 (>3.12)",
+    ]
+    tight = tmp_path / "tight"
+    tight.mkdir()
+    _project(
+        tight, '[project]\nrequires-python = ">=3.12"\n[tool.mypy]\nstrict = true\n'
+    )
+    assert verify.typing_warnings(tight) == []
+
+
+def test_warnings_are_printed_and_never_fail_the_run(monkeypatch, tmp_path, capsys):
+    project = tmp_path / "demo"
+    project.mkdir()
+    (project / "ROADMAP.md").write_text("# demo\n", encoding="utf-8")
+    _project(project, '[project]\nrequires-python = ">3.12"\n')
+    monkeypatch.setattr(verify, "ROOT", tmp_path)
+    monkeypatch.setattr(verify, "run", lambda cmd, cwd, timeout=None: (0, "", ""))
+    assert verify.main(["--project", "demo"]) == 0
+    out = capsys.readouterr().out
+    assert "WARN mypy not strict (1): demo" in out
+    assert "WARN requires-python excludes 3.12.0 (1): demo" in out

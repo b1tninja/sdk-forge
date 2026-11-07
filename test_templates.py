@@ -172,3 +172,48 @@ def test_polish_runs_on_a_staged_copy_and_leaves_valid_python():
     for rel, data in polished.items():
         if rel.endswith(".py"):
             ast.parse(data.decode("utf-8"))
+
+
+def _rendered(name: str = "rtrkit") -> dict[str, str]:
+    spec = next(p for p in forge.load_projects() if p["name"] == name)
+    return {
+        k: v.decode("utf-8") for k, v in forge.render_project(spec, plan=False).items()
+    }
+
+
+def test_the_rendered_python_floor_admits_3_12_0():
+    """`>3.12` is exclusive under PEP 440: it refused 3.12.0 while the classifiers and CI claimed 3.12."""
+    import tomllib
+
+    from packaging.specifiers import SpecifierSet
+
+    data = tomllib.loads(_rendered()["pyproject.toml"])
+    floor = SpecifierSet(data["project"]["requires-python"])
+    assert floor.contains("3.12.0"), floor
+    assert not floor.contains("3.11.9")
+    backend = data["build-system"]["requires"][0]
+    assert SpecifierSet(backend.removeprefix("hatchling")).contains("1.25"), backend
+
+
+def test_assert_is_refused_outside_tests_and_allowed_inside():
+    import tomllib
+
+    lint = tomllib.loads(_rendered()["pyproject.toml"])["tool"]["ruff"]["lint"]
+    assert "S" in lint["select"]
+    assert "S101" not in lint.get("ignore", []), (
+        "python -O strips asserts in package code"
+    )
+    assert "S101" in lint["per-file-ignores"]["tests/*"]
+
+
+def test_every_written_mypy_gate_checks_the_tests_too():
+    files = _rendered()
+    pkg = "rtrkit"
+    gates = [
+        line.strip()
+        for text in files.values()
+        for line in text.splitlines()
+        if re.search(rf"\bmypy {pkg}\b", line)
+    ]
+    assert gates, "the gate is written down somewhere"
+    assert all(line.endswith(f"mypy {pkg} tests") for line in gates), gates

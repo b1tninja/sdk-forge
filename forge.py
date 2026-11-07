@@ -95,7 +95,9 @@ def sentence(summary: str) -> str:
     return head if head.endswith((".", "!", "?", ":")) else head + "."
 
 
-def wrap(text: str, width: int, indent: str = "", first: str | None = None) -> list[str]:
+def wrap(
+    text: str, width: int, indent: str = "", first: str | None = None
+) -> list[str]:
     """Wrap prose to width, keeping words whole and returning indented lines.
 
     `first` lets a caller prefix only the opening line, which is how a docstring puts its
@@ -215,7 +217,9 @@ def load_projects() -> list[dict[str, Any]]:
     for module in (routing, naming, certificate):
         for project in module.PROJECTS:
             if project["name"] in by_name:
-                raise ValueError(project["name"] + ": defined in more than one forge_data module")
+                raise ValueError(
+                    project["name"] + ": defined in more than one forge_data module"
+                )
             by_name[project["name"]] = project
     if set(by_name) != set(PROJECT_ORDER):
         raise ValueError(
@@ -236,6 +240,9 @@ OPEN_QUESTIONS = {
 # ------------------------------------------------------------------------- rendering helpers
 
 GT = chr(62)  # the shell guard misreads a literal greater-than in source as redirection
+# ">=" and never ">": ">3.12" is exclusive under PEP 440, so it refused 3.12.0 itself while every
+# classifier and the CI matrix claimed 3.12. 31 pyprojects carried that before it was caught.
+GE = GT + "="
 
 
 def subs(text: str, mapping: dict[str, object]) -> str:
@@ -257,7 +264,7 @@ PYPROJECT = """
 # Declared explicitly rather than relying on pip's legacy setuptools fallback: with no
 # build-system table pip injects an unpinned setuptools environment, so a build is
 # neither reproducible nor hermetic.
-requires = ["hatchling@GTE@1.25"]
+requires = ["hatchling@GE@1.25"]
 build-backend = "hatchling.build"
 
 [project]
@@ -268,7 +275,7 @@ dynamic = ["version"]
 description = "@DESC@"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = "@GTE@3.12"
+requires-python = "@GE@3.12"
 authors = [{ name = "Justin Capella" }]
 keywords = @KW@
 classifiers = [
@@ -349,8 +356,9 @@ line-length = 100
 select = ["E", "W", "F", "I", "B", "N", "UP", "SIM", "C4", "PT", "RUF", "S", "RET", "ARG"]
 ignore = [
   "E501",  # line length is the formatter's job
-  "S101",  # assert belongs in tests, and this repo has a written policy on it
 ]
+# S101 is not ignored here: `python -O` strips an assert, so one in package code is a check that
+# vanishes in exactly the build that ships without the test suite watching.
 
 [tool.ruff.lint.per-file-ignores]
 # S101 in tests is the policy, S311 is a seeded generator rather than a token, and a
@@ -391,9 +399,11 @@ def render_pyproject(p: dict[str, Any]) -> str:
             "EXTRAS": extras,
             "SCRIPTS": scripts,
             "ORG": ORG,
-            "GTE": GT,
+            "GE": GE,
         },
     )
+
+
 README = """
 # @NAME@
 
@@ -463,7 +473,7 @@ All four gates must pass, on Linux and Windows alike:
 
 ```bash
 ruff check . && ruff format --check .
-mypy @PKG@
+mypy @PKG@ tests
 pytest -q --cov
 python -O -m pytest -q
 ```
@@ -580,6 +590,8 @@ def nongoal_rows(p: dict[str, Any]) -> str:
 
 def steps_block(p: dict[str, Any]) -> str:
     return "\n".join("- " + s for s in p["steps"])
+
+
 # ------------------------------------------------------------------ supporting project files
 
 CONTRIBUTING = """
@@ -589,7 +601,7 @@ Short version: four gates, and they all have to pass on Linux and Windows.
 
 ```bash
 ruff check . && ruff format --check .
-mypy @PKG@
+mypy @PKG@ tests
 pytest -q --cov
 python -O -m pytest -q
 ```
@@ -736,7 +748,7 @@ jobs:
       - run: python -m @PIPIN@ -e ".[dev]"
       - run: ruff check .
       - run: ruff format --check .
-      - run: mypy @PKG@
+      - run: mypy @PKG@ tests
       # check_dist inspects a built wheel, so the wheel is built here rather than assumed to exist.
       # The step looked green for months on one machine because an earlier manual build had left a
       # wheel in dist/: a cache impersonating a check, and the first CI run this project ever had
@@ -1084,6 +1096,8 @@ def render_extras(p):
         "tools/write_freeze.py": subs(WRITE_FREEZE, base),
     }
     return files
+
+
 # ---------------------------------------------------------------------- package rendering
 
 # The annotation vocabulary a generated module may name, split by where the name comes
@@ -1540,6 +1554,8 @@ def render_package(p: dict[str, Any]) -> dict[str, str]:
         )
     files["conftest.py"] = docstring(CONFTEST_DOC[0], CONFTEST_DOC[1]) + "\n"
     return files
+
+
 TPL_DIR = HERE / "templates"
 DQ = chr(34)
 H2 = chr(35) + chr(35) + " "
@@ -1682,7 +1698,7 @@ def render_index(projects):
 # ---------------------------------------------------------------------------
 
 
-AGENTS_PROJECT = '''# Instructions for coding agents
+AGENTS_PROJECT = """# Instructions for coding agents
 
 <<SUMMARY>>
 
@@ -1698,7 +1714,7 @@ what the library is for. Read those three before changing anything.
     python -m pytest -q tests/test_public_api.py::test_stubs_are_loud
     python -m ruff check .
     python -m ruff format --check .
-    python -m mypy <<PKG>>
+    python -m mypy <<PKG>> tests
 
 The first line installs the dev extras. The six commands after it are the gates,
 and all six must pass before a change is finished. CI runs the same set on Linux
@@ -1740,10 +1756,10 @@ rather than merely incomplete.
 and lists the section refs for this project. If you are not running in Cline, the
 same procedure applies: confirm the document, read its errata, pull the normative
 statements, then write code.
-'''
+"""
 
 
-CLINERULE = '''---
+CLINERULE = """---
 description: Fetch the specification text before changing protocol code
 paths:
   - "<<PKG>>/**"
@@ -1804,10 +1820,10 @@ with their line ranges.
 - An empty response is a protocol outcome, not a success value. Distinguish "the
   server said no" from "nothing arrived", or you reproduce the RFC 9849 compression
   failure, where a silent empty value made an optional extension load-bearing.
-'''
+"""
 
 
-WORKFLOW = '''---
+WORKFLOW = """---
 description: Implement one ROADMAP.md obligation, correctly and verifiably
 ---
 
@@ -1829,7 +1845,7 @@ Implement the next unchecked row of `ROADMAP.md` in this project, working from
 6. Run every gate listed in `AGENTS.md` and fix what fails.
 7. Commit with the citation from `rfclib.cite` in the message body. No
    `Co-Authored-By` trailer.
-'''
+"""
 
 
 def sub(text, mapping):
@@ -1862,11 +1878,23 @@ def docs_block(p):
         sect = chr(167)
         for section in (entry.get("sections") or [])[:2]:
             lines.append(
-                "  - `rfclib.read(" + quote + "RFC" + number + sect + str(section)
-                + quote + ", view=" + quote + "normative" + quote + ")`"
+                "  - `rfclib.read("
+                + quote
+                + "RFC"
+                + number
+                + sect
+                + str(section)
+                + quote
+                + ", view="
+                + quote
+                + "normative"
+                + quote
+                + ")`"
             )
         if entry.get("errata"):
-            lines.append("  - `rfclib.errata(" + quote + "RFC" + number + quote + ")` first")
+            lines.append(
+                "  - `rfclib.errata(" + quote + "RFC" + number + quote + ")` first"
+            )
     return chr(10).join(lines) if lines else "- see docs/rfc-map.md"
 
 
@@ -1925,7 +1953,7 @@ def spine_facts(p):
             "The primary document of this project is "
             + str(first.get("label") or "docs/rfc-map.md")
             + ", which is not an RFC, so the `rfclib` calls below resolve only the RFC\n"
-            "refs listed under \"Section refs for this project\"; read the non-RFC\n"
+            'refs listed under "Section refs for this project"; read the non-RFC\n'
             "specification from its own publisher."
         )
     field = "extensions"
@@ -1955,7 +1983,9 @@ def agents_files(p):
     desc = p.get("desc") or p.get("title") or p["name"]
     deps = p.get("deps") or []
     if deps:
-        deps_text = "these runtime dependencies: " + ", ".join(dep_label(d) for d in deps)
+        deps_text = "these runtime dependencies: " + ", ".join(
+            dep_label(d) for d in deps
+        )
     else:
         deps_text = "no runtime dependencies"
     project = sub(
@@ -2110,7 +2140,9 @@ def bullet(text, width=DOC_WIDTH):
 
 def dep_line(name, dep):
     """One dependency bullet: the edge, why it is hard, and whether it exists."""
-    why = DEPENDS_WHY.get((name, dep), "the portfolio plan records this as a hard dependency")
+    why = DEPENDS_WHY.get(
+        (name, dep), "the portfolio plan records this as a hard dependency"
+    )
     state = dep_state(dep)
     label, detail = DEP_OVERRIDE.get((dep, state)) or DEP_TEXT[state]
     detail = subs(detail, {"DEP": dep})
@@ -2122,8 +2154,16 @@ def dep_line(name, dep):
 
 def position_block(name):
     tier, wave, _deps = POSITION[name]
-    return para("**Tier " + str(tier) + ", wave " + str(wave) + "** - " + WAVE_NOTE[wave]
-                + ". " + TIER_NOTE[tier])
+    return para(
+        "**Tier "
+        + str(tier)
+        + ", wave "
+        + str(wave)
+        + "** - "
+        + WAVE_NOTE[wave]
+        + ". "
+        + TIER_NOTE[tier]
+    )
 
 
 def depends_block(name):
@@ -2167,27 +2207,30 @@ def rules_block():
 def render_plan(p):
     """Render docs/plan.md: where this project sits, what gates it, what constrains it."""
     name = p["name"]
-    return "\n".join(
-        [
-            "# Portfolio position",
-            "",
-            para(INTRO),
-            "",
-            "## Position",
-            "",
-            position_block(name),
-            "",
-            "## Depends on",
-            "",
-            depends_block(name),
-            "",
-            "## Sequencing rules",
-            "",
-            rules_block(),
-            "",
-            para(POINTER),
-        ]
-    ).strip() + "\n"
+    return (
+        "\n".join(
+            [
+                "# Portfolio position",
+                "",
+                para(INTRO),
+                "",
+                "## Position",
+                "",
+                position_block(name),
+                "",
+                "## Depends on",
+                "",
+                depends_block(name),
+                "",
+                "## Sequencing rules",
+                "",
+                rules_block(),
+                "",
+                para(POINTER),
+            ]
+        ).strip()
+        + "\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2216,7 +2259,9 @@ def render_plan(p):
 MANIFEST = pathlib.Path(
     os.environ.get("FORGE_MANIFEST") or HERE / "forge_data" / "generated.json"
 )
-WORKSPACE = "."  # the manifest key for files at the workspace root rather than in a project
+WORKSPACE = (
+    "."  # the manifest key for files at the workspace root rather than in a project
+)
 INDEX = "protocol-sdks.md"
 PLAN_MARKER = "This file is generated by sdk-forge/forge.py"
 KINDS = (
@@ -2283,7 +2328,9 @@ def render_plan_file(p: dict[str, Any]) -> dict[str, bytes]:
     p = normalize(p)
     if p["name"] not in POSITION:
         # Loud rather than skipped: a project with no row is a project whose wave nobody decided.
-        raise KeyError(p["name"] + ": no POSITION row, so its tier and wave are undecided")
+        raise KeyError(
+            p["name"] + ": no POSITION row, so its tier and wave are undecided"
+        )
     return {"docs/plan.md": plan_bytes(render_plan(p))}
 
 
@@ -2291,7 +2338,9 @@ def render_project(p: dict[str, Any], plan: bool = True) -> dict[str, bytes]:
     """Every file the generator owns in one project, as the bytes it would write."""
     p = normalize(p)
     if p["name"] not in POSITION:
-        raise KeyError(p["name"] + ": no POSITION row, so its tier and wave are undecided")
+        raise KeyError(
+            p["name"] + ": no POSITION row, so its tier and wave are undecided"
+        )
     texts = {
         "pyproject.toml": render_pyproject(p),
         "README.md": render_readme(p),
@@ -2331,7 +2380,15 @@ def polish(name: str, files: dict[str, bytes]) -> tuple[dict[str, bytes], list[s
                 (stage / rel).write_bytes(files[rel])
         for cmd in (
             ["-m", "ruff", "format", "--no-cache"],
-            ["-m", "ruff", "check", "--no-cache", "--fix", "--select", "I001,F401,RUF022"],
+            [
+                "-m",
+                "ruff",
+                "check",
+                "--no-cache",
+                "--fix",
+                "--select",
+                "I001,F401,RUF022",
+            ],
         ):
             try:
                 done = subprocess.run(
@@ -2342,7 +2399,9 @@ def polish(name: str, files: dict[str, bytes]) -> tuple[dict[str, bytes], list[s
                     encoding="utf-8",
                     errors="replace",
                 )
-            except OSError as error:  # the tool is missing; verification will say so loudly
+            except (
+                OSError
+            ) as error:  # the tool is missing; verification will say so loudly
                 notes.append(name + ": " + cmd[2] + " could not run: " + str(error))
                 continue
             if done.returncode != 0:
@@ -2417,7 +2476,11 @@ def decide(
             action, reason = "keep", "hand-owned by decision D17"
         elif hand_owned_project:
             action = "keep"
-            reason = "ROADMAP.md has " + str(done) + " done row(s), so the project is hand-owned"
+            reason = (
+                "ROADMAP.md has "
+                + str(done)
+                + " done row(s), so the project is hand-owned"
+            )
         elif current is None:
             action, reason = "create", ""
         elif (
@@ -2425,16 +2488,27 @@ def decide(
             and b"NotImplementedError" in data
             and b"NotImplementedError" not in current
         ):
-            action, reason = "keep", "no NotImplementedError left: the module is implemented"
+            action, reason = (
+                "keep",
+                "no NotImplementedError left: the module is implemented",
+            )
         elif rel in recorded:
             if sha(current) == recorded[rel]:
                 action, reason = "update", ""
             else:
                 action, reason = "keep", "edited since the generator last wrote it"
-        elif kind == "plan" and PLAN_MARKER in " ".join(current.decode("utf-8", "replace").split()):
-            action, reason = "update", "unrecorded, but it carries the generated-file header"
+        elif kind == "plan" and PLAN_MARKER in " ".join(
+            current.decode("utf-8", "replace").split()
+        ):
+            action, reason = (
+                "update",
+                "unrecorded, but it carries the generated-file header",
+            )
         elif adopt:
-            action, reason = "update", "unrecorded, adopted as generator output by --adopt"
+            action, reason = (
+                "update",
+                "unrecorded, adopted as generator output by --adopt",
+            )
         else:
             action = "keep"
             reason = "unrecorded: nothing says it is unedited generator output (--adopt takes it over)"
@@ -2443,13 +2517,17 @@ def decide(
 
 
 def unified(decision: Decision) -> str:
-    before = (decision.current or b"").decode("utf-8", "replace").splitlines(keepends=True)
+    before = (
+        (decision.current or b"").decode("utf-8", "replace").splitlines(keepends=True)
+    )
     after = decision.data.decode("utf-8", "replace").splitlines(keepends=True)
     label = decision.project + "/" + decision.rel
     return "".join(difflib.unified_diff(before, after, "a/" + label, "b/" + label))
 
 
-def apply(decisions: list[Decision], root: pathlib.Path, recorded: dict[str, str]) -> int:
+def apply(
+    decisions: list[Decision], root: pathlib.Path, recorded: dict[str, str]
+) -> int:
     """Write what decide() allowed and record it. Kept files are neither written nor recorded."""
     written = 0
     for decision in decisions:
@@ -2480,7 +2558,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="append",
         default=[],
         metavar="KIND",
-        help="write only these kinds of file (repeatable, or comma-separated): " + ", ".join(KINDS),
+        help="write only these kinds of file (repeatable, or comma-separated): "
+        + ", ".join(KINDS),
     )
     parser.add_argument(
         "--check",
@@ -2490,7 +2569,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="write nothing; list what would change and exit 1 if anything would",
     )
     parser.add_argument(
-        "--diff", action="store_true", help="with --check, also print a unified diff of each change"
+        "--diff",
+        action="store_true",
+        help="with --check, also print a unified diff of each change",
     )
     parser.add_argument(
         "--adopt",
@@ -2510,7 +2591,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     if args.adopt and not args.project:
         # Adoption asserts that files nobody recorded are unedited, which someone has to have checked
         # project by project; a workspace-wide --adopt is that assertion made about everything at once.
-        parser.error("--adopt needs --project: check each project's files before adopting them")
+        parser.error(
+            "--adopt needs --project: check each project's files before adopting them"
+        )
     return args
 
 
@@ -2523,7 +2606,9 @@ def run(argv: list[str] | None = None) -> int:
     notes: list[str] = []
     written = 0
 
-    def settle(name: str, root: pathlib.Path, files: dict[str, bytes], kind: dict[str, str]) -> None:
+    def settle(
+        name: str, root: pathlib.Path, files: dict[str, bytes], kind: dict[str, str]
+    ) -> None:
         nonlocal written
         recorded = manifest.setdefault(name, {})
         found = decide(name, root, files, kind, recorded, adopt=args.adopt)
@@ -2545,9 +2630,19 @@ def run(argv: list[str] | None = None) -> int:
             settle(p["name"], ROOT / p["name"], {r: files[r] for r in wanted}, kind)
     if "plan" in kinds:
         for p in chosen:
-            settle(p["name"], ROOT / p["name"], render_plan_file(p), {"docs/plan.md": "plan"})
+            settle(
+                p["name"],
+                ROOT / p["name"],
+                render_plan_file(p),
+                {"docs/plan.md": "plan"},
+            )
     if not args.project and "index" in kinds:
-        settle(WORKSPACE, ROOT, {INDEX: managed_bytes(render_index(ALL_PROJECTS))}, {INDEX: "index"})
+        settle(
+            WORKSPACE,
+            ROOT,
+            {INDEX: managed_bytes(render_index(ALL_PROJECTS))},
+            {INDEX: "index"},
+        )
     manifest = {name: rec for name, rec in manifest.items() if rec}
     if not args.check:
         save_manifest(manifest)
@@ -2556,7 +2651,14 @@ def run(argv: list[str] | None = None) -> int:
         if d.action == "unchanged":
             continue
         shown = d.action if d.action == "keep" else verb + d.action
-        print(shown + " " + d.project + "/" + d.rel + (" - " + d.reason if d.reason else ""))
+        print(
+            shown
+            + " "
+            + d.project
+            + "/"
+            + d.rel
+            + (" - " + d.reason if d.reason else "")
+        )
         if args.check and args.diff and d.action in WRITES:
             print(unified(d), end="")
     changes = sum(1 for d in decisions if d.action in WRITES)

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Installed by sdk-forge/check_hygiene.py --install.
+# Stops a commit that deletes a markdown heading by accident or adds scratch to the tree.
+# Escape hatch: git commit --no-verify, or FORGE_ALLOW_HEADING_LOSS=1 for the heading check only.
+
+# The hooks path lives inside sdk-forge, so the checker is one directory up from this script. Fall
+# back to the repo layout and then to a sibling checkout, because the forge is a subtree of the
+# workspace here and a standalone clone elsewhere.
+FORGE_HOME="${FORGE_HOME:-$(cd "$(dirname "$0")/.." && pwd)}"
+for guess in "$FORGE_HOME" "$(git rev-parse --show-toplevel)/sdk-forge" "$(git rev-parse --show-toplevel)/../sdk-forge"; do
+  if [ -f "$guess/check_hygiene.py" ]; then
+    FORGE_HOME="$guess"
+    break
+  fi
+done
+
+# `python` and `py` are not interchangeable on Windows boxes: one is often absent while the other is
+# the launcher. A hook that cannot find an interpreter must not silently succeed.
+PY="${PYTHON:-python}"
+command -v "$PY" >/dev/null 2>&1 || PY=py
+
+if [ ! -f "$FORGE_HOME/check_hygiene.py" ] || ! command -v "$PY" >/dev/null 2>&1; then
+  # Deliberately fatal. A gate that cannot run and exits 0 reports the same green as a clean tree,
+  # which is how a check becomes decoration without anyone deciding to remove it.
+  echo "pre-commit: cannot run sdk-forge hygiene check (FORGE_HOME unresolved or no interpreter)." >&2
+  echo "pre-commit: set FORGE_HOME, or bypass with --no-verify if you accept no check ran." >&2
+  exit 1
+fi
+exec "$PY" "$FORGE_HOME/check_hygiene.py"

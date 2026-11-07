@@ -1,0 +1,8 @@
+# One pinned toolchain for the portfolio, held here so every project is judged by the same linter.
+# The pins are not cosmetic. This repository's own CI went red on a commit that passed locally because
+# `pip install ruff` pulled a newer version that enables ISC004 and rejects an implicit string
+# concatenation in a forge.py template that 0.15.12 accepts. A gate whose verdict moves with whatever
+# pip fetched today is weather, not a gate. Consumers of the composite action install this file too.
+ruff==0.15.12
+mypy==1.20.2
+pytest==9.0.3

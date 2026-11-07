@@ -4115,6 +4115,12 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy @PKG@
+      # check_dist inspects a built wheel, so the wheel is built here rather than assumed to exist.
+      # The step looked green for months on one machine because an earlier manual build had left a
+      # wheel in dist/: a cache impersonating a check, and the first CI run this project ever had
+      # failed it immediately.
+      - run: python -m @PIPIN@ build
+      - run: python -m build --wheel --quiet
       - run: python tools/check_dist.py
 
   test:
@@ -4291,9 +4297,21 @@ def main():
         text=True,
         check=True,
     ).stdout
-    lines = [line for line in frozen.splitlines() if line.strip()]
+    # Drop the project's own entry. pip freeze records the local tree as an editable or VCS reference,
+    # and pip-audit then installs that URL to audit it: on a private repository the anonymous clone
+    # fails, and the audit reports a build error instead of advisories. A project is not one of its own
+    # dependencies, and only third-party distributions carry advisories worth resolving.
+    lines = []
+    dropped = 0
+    for line in frozen.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("-e") or "git+" in line or "file://" in line:
+            dropped += 1
+            continue
+        lines.append(line)
     pathlib.Path(sys.argv[1]).write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
-    print(f"{len(lines)} distributions written to {sys.argv[1]}")
+    print(f"{len(lines)} distributions written to {sys.argv[1]} ({dropped} self-reference(s) excluded)")
     return 0 if lines else 1
 
 
@@ -7190,10 +7208,14 @@ def build(p):
     return count
 
 
-# No __main__ guard here. The guard belongs to the last part in parts/, because a
-# guard placed here would call run() before the wrappers that follow this file have
-# reassigned build, and every artefact those parts own would silently stop being
-# written. Assembled files are concatenated in numeric order, so the last part wins.
+# This file used to be assembled from parts/partNN.py by numeric concatenation, and the comment that
+# stood here explained why no __main__ guard appeared at this point in the middle of the file: the
+# guard had to live in the last part, because a guard placed earlier would call run() before the
+# wrappers that follow had reassigned build, and every artefact those parts owned would silently stop
+# being written. parts/ was deleted on 2026-11-07 as a stale second copy of these same template strings
+# - forge.py never read it, and the duplication had already caused a near-edit of one copy and not the
+# other. The concatenation order is still the reason the guard sits at the very end: keep it there.
+# Recover the original parts from git history if the assembly is ever needed again.
 
 # ---------------------------------------------------------------------------
 # Part 20: portfolio position (docs/plan.md)

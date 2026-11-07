@@ -1,19 +1,23 @@
 """Verification driver for the generated protocol SDK projects.
 
-For every qualifying project under D:\\code this runs the five gates the forge
-promises (compile, pytest, ruff lint, ruff format, mypy) with the interpreter that
-is executing this script and the project directory as the working directory, then
-prints one status line per project, a per-gate summary, and the captured output of
-every failing gate.
+For every qualifying project under FORGE_ROOT (default D:\\code) this runs the five
+gates the forge promises (compile, pytest, ruff lint, ruff format, mypy) with the
+interpreter that is executing this script and the project directory as the working
+directory, then prints one status line per project, a per-gate summary, and the
+captured output of every failing gate. A gate that runs longer than VERIFY_TIMEOUT
+seconds (default 900) is killed and reported as a failure, so one hung suite cannot
+stall the whole pass.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path("D:/code")
+ROOT = Path(os.environ.get("FORGE_ROOT") or "D:/code")
+TIMEOUT = float(os.environ.get("VERIFY_TIMEOUT") or 900)
 MAX_LINES = 60
 
 PROJECTS = [
@@ -55,16 +59,32 @@ PROJECTS = [
 GATES = ["compile", "pytest", "ruff", "format", "mypy"]
 
 
-def run(cmd: list[str], cwd: Path) -> tuple[int, str, str]:
-    proc = subprocess.run(
-        [sys.executable, *cmd],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+def run(
+    cmd: list[str], cwd: Path, timeout: float | None = None
+) -> tuple[int, str, str]:
+    limit = TIMEOUT if timeout is None else timeout
+    try:
+        proc = subprocess.run(
+            [sys.executable, *cmd],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=limit,
+        )
+    except subprocess.TimeoutExpired as expired:
+        # 124 is timeout(1)'s status; the partial output is kept so the hang can be located.
+        note = f"timed out after {limit:g} seconds"
+        err = _text(expired.stderr)
+        return 124, _text(expired.stdout), f"{err}\n{note}" if err else note
     return proc.returncode, proc.stdout or "", proc.stderr or ""
+
+
+def _text(data: str | bytes | None) -> str:
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data or ""
 
 
 def qualifies(name: str) -> Path | None:

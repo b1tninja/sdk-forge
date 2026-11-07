@@ -7366,47 +7366,54 @@ DEPENDS_WHY = {
                            "them, so certificate parsing stays in asn1core",
 }
 
-# How to state each dependency's current existence. An arrow to something that
-# is not there is said as missing, not as a to-do: PORTFOLIO.md section 10 is
-# explicit that until asn1core exists no certificate-shaped project can ship
-# behaviour, and a shell that ships none is a gate of its own.
-DEP_STATE = {
-    "asn1core": (
+# How to state each dependency's current existence, keyed by what deps.py finds on the disk. This used to
+# be a static table, and its asn1core entry ("does not exist yet") outlived the fact: asn1core gained a
+# package, a test suite and history while nine plans kept asserting the opposite, and nothing re-read
+# the claim. The state is now read at generation time, so a plan can only say what the workspace shows.
+# What the workspace cannot show is whether a dependency provides the capability a row needs, so the
+# "code" text says exactly that and stops.
+DEP_TEXT = {
+    "absent": (
         "does not exist yet",
-        "There is no asn1core project and no asn1core code: the workspace holds only its "
-        "extraction plan at ../../asn1core/PLAN.md.",
+        "There is no @DEP@ directory in the workspace.",
     ),
-    "pkix": (
+    "plan only": (
+        "exists only as a plan, with no code yet",
+        "There is no @DEP@ code or test suite: the workspace holds only its extraction plan "
+        "at ../../@DEP@/PLAN.md.",
+    ),
+    "shell": (
         "exists only as a generated shell, with no protocol behaviour yet",
         "Its public functions raise NotImplementedError until its own roadmap rows are "
         "done, so a row here that consumes it cannot be closed on the strength of a "
         "directory existing.",
     ),
-    "rpkit": (
-        "exists only as a generated shell, with no protocol behaviour yet",
-        "Its public functions raise NotImplementedError until its own roadmap rows are "
-        "done, so a row here that consumes it cannot be closed on the strength of a "
-        "directory existing.",
+    "code": (
+        "exists as code",
+        "It has source files and a test suite of its own, and its own README states its "
+        "release status. That it exists does not say it provides what a row here needs: "
+        "which capability a row consumes is decided row by row.",
     ),
-    "rtrkit": (
-        "exists only as a generated shell, with no protocol behaviour yet",
-        "Its public functions raise NotImplementedError until its own roadmap rows are "
-        "done, so a row here that consumes it cannot be closed on the strength of a "
-        "directory existing.",
-    ),
-    "asnkit": (
-        "exists only as a generated shell, with no protocol behaviour yet",
-        "Its public functions raise NotImplementedError until its own roadmap rows are "
-        "done, so a row here that consumes it cannot be closed on the strength of a "
-        "directory existing.",
-    ),
-    "namespy": (
+}
+
+# Hand-written statements about a dependency that replace the generic text for one state. namespy is
+# software outside the generator, and that fact is recorded rather than derivable from the disk.
+DEP_OVERRIDE = {
+    ("namespy", "code"): (
         "exists",
         "namespy is implemented software outside the generator - a wire codec, an "
         "iterative resolver, DNSSEC, DoT and DoH legs - and it is the one place in this "
         "portfolio where the pattern has been proven end to end.",
     ),
 }
+
+
+def dep_state(dep):
+    """What the workspace shows for a dependency: absent, plan only, shell or code."""
+    import deps  # lazy: the generator should not need the planning modules to import
+
+    return deps.dependency_state(ROOT, dep).state
+
 
 # Edges the portfolio plan records as candidate rather than load-bearing.
 CANDIDATE_EDGES = {("dnssd-srp", "namespy")}
@@ -7439,12 +7446,21 @@ NO_DEPS_NOTE = (
 )
 
 BLOCKED_NOTE = (
-    "**Blocked, not in progress.** asn1core does not exist yet, so @NAME@ cannot ship "
-    "behaviour until asn1core does. A roadmap row that parses, encodes or verifies a DER "
-    "structure is not deferred work here: it is gated on a project that has no code and "
-    "no test suite. Any plan, milestone or release note that cites asn1core says blocked "
+    "**Blocked, not in progress.** asn1core has no code and no test suite, so @NAME@ cannot "
+    "ship behaviour until it does. A roadmap row that parses, encodes or verifies a DER "
+    "structure is not deferred work here: it is gated on a project that has nothing to "
+    "build on. Any plan, milestone or release note that cites asn1core says blocked "
     "rather than in progress, and no release of @NAME@ is promised before asn1core has one "
     "of its own."
+)
+
+GATED_NOTE = (
+    "**Gated by coverage, not by absence.** asn1core now has code and a test suite, so "
+    "@NAME@ is no longer waiting for the project to exist. It is still waiting for the "
+    "structures it needs: a roadmap row that parses, encodes or verifies a DER structure "
+    "cites the asn1core capability it consumes, and stays deferred until that capability "
+    "has a passing test there. No release of @NAME@ is promised before asn1core has one of "
+    "its own."
 )
 
 SHELL_NOTE = (
@@ -7471,11 +7487,6 @@ POINTER = (
 )
 
 
-# Dependencies the state table above describes as shells, derived rather than
-# repeated so the two cannot disagree about what a shell is.
-SHELL_DEPS = frozenset(dep for dep, state in DEP_STATE.items() if "shell" in state[0])
-
-
 def para(text, width=DOC_WIDTH):
     """Wrap one prose paragraph to the generator's document width."""
     return "\n".join(wrap(collapse(text), width))
@@ -7489,7 +7500,9 @@ def bullet(text, width=DOC_WIDTH):
 def dep_line(name, dep):
     """One dependency bullet: the edge, why it is hard, and whether it exists."""
     why = DEPENDS_WHY.get((name, dep), "the portfolio plan records this as a hard dependency")
-    label, detail = DEP_STATE[dep]
+    state = dep_state(dep)
+    label, detail = DEP_OVERRIDE.get((dep, state)) or DEP_TEXT[state]
+    detail = subs(detail, {"DEP": dep})
     text = "**" + dep + "** - " + why + ". **Status: " + label + ".** " + detail
     if (name, dep) in CANDIDATE_EDGES:
         text += " " + CANDIDATE_NOTE
@@ -7507,7 +7520,7 @@ def depends_block(name):
     if not deps:
         return para(NO_DEPS_NOTE)
     blocks = ["\n".join(dep_line(name, dep) for dep in deps)]
-    shells = sorted(dep for dep in deps if dep in SHELL_DEPS)
+    shells = sorted(dep for dep in deps if dep_state(dep) == "shell")
     if shells:
         blocks.append(
             para(
@@ -7521,7 +7534,8 @@ def depends_block(name):
             )
         )
     if "asn1core" in deps:
-        blocks.append(para(subs(BLOCKED_NOTE, {"NAME": name})))
+        note = GATED_NOTE if dep_state("asn1core") == "code" else BLOCKED_NOTE
+        blocks.append(para(subs(note, {"NAME": name})))
     return "\n\n".join(blocks)
 
 

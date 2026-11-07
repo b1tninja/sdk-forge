@@ -16,6 +16,7 @@ imported the module to inspect it - which is what these tests do.
 from __future__ import annotations
 
 import pathlib
+import re
 
 import forge
 
@@ -49,10 +50,26 @@ def test_main_guard_is_the_last_statement():
     assert lines[-2].strip() == 'if __name__ == "__main__":'
 
 
-def test_importing_this_module_did_not_generate_anything():
-    """`import forge` above must not have written files into the workspace."""
-    assert callable(forge.run)
-    assert not hasattr(forge, "_GENERATED_THIS_IMPORT")
+def test_importing_the_generator_cannot_run_it():
+    """A bare module-level run() would rewrite every generated project when anything imported forge.
+
+    The first version of this test asserted `not hasattr(forge, "_GENERATED_THIS_IMPORT")`, checking a
+    name invented for the purpose - it could not fail, which is worse than having no test because it
+    reads as coverage. These two assertions can fail: no module-level call, and the forge is not itself
+    a project the generator writes into.
+    """
+    module_level = [
+        line
+        for line in (HERE / "forge.py").read_text(encoding="utf-8").splitlines()
+        if re.match(r"^run\(\)", line)
+    ]
+    assert module_level == [], module_level
+
+    from verify import PROJECTS
+
+    assert "sdk-forge" not in PROJECTS, (
+        "the generator must not write into its own source tree"
+    )
 
 
 def test_scratch_and_duplicate_templates_are_gone():

@@ -6,3 +6,7 @@
 ruff==0.15.12
 mypy==1.20.2
 pytest==9.0.3
+# Pinned so the MCP surface is tested against a known API rather than whatever pip fetched. mcp 2.x
+# renamed FastMCP to MCPServer; the smoke test in test_planner.py is what notices, and it can only
+# notice if the version is not a moving target.
+mcp==2.3.0

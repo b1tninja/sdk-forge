@@ -27,13 +27,13 @@ jobs:
       # hold 152 ruff findings between them, and pretending otherwise would make the gate red on
       # arrival and get it silenced on the first failure. They are scheduled for removal, not
       # adopted. See PORTFOLIO.md and the workspace AGENTS.md rule on scratch.
-      - run: python -m ruff check forge.py names.py verify.py sync_roadmap.py check_hygiene.py test_sync_roadmap.py test_check_hygiene.py
+      - run: python -m ruff check forge.py names.py verify.py sync_roadmap.py check_hygiene.py planner.py test_sync_roadmap.py test_check_hygiene.py test_planner.py
       # Format is gated only on the files that are plain code. forge.py and names.py would both be
       # reformatted, and they hold the template strings whose wrapping becomes the generated source of
       # eighteen repositories: reformatting them is a change to every project, made from a CI job that
       # looks like a lint run. That trade is not this gate's to make.
-      - run: python -m ruff format --check sync_roadmap.py verify.py check_hygiene.py test_sync_roadmap.py test_check_hygiene.py
-      - run: python -m mypy sync_roadmap.py check_hygiene.py
+      - run: python -m ruff format --check sync_roadmap.py verify.py check_hygiene.py planner.py test_sync_roadmap.py test_check_hygiene.py test_planner.py
+      - run: python -m mypy sync_roadmap.py check_hygiene.py planner.py
       # The real tests, in one place. This used to be a heredoc duplicating assertions that also lived
       # in a scratch file, and the two drifted on the very commit that added them.
-      - run: python -m pytest -q test_sync_roadmap.py test_check_hygiene.py
+      - run: python -m pytest -q test_sync_roadmap.py test_check_hygiene.py test_planner.py

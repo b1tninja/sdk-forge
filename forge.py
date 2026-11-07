@@ -7,6 +7,7 @@ files in place; hand-written module bodies and extra tests are left alone.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 import shutil
@@ -4441,9 +4442,6 @@ def render_extras(p):
     }
     return files
 # ---------------------------------------------------------------------- package rendering
-
-import ast
-import re
 
 # The annotation vocabulary a generated module may name, split by where the name comes
 # from. Which module owns each alias is ruff's call, not ours: UP035 rejects the typing

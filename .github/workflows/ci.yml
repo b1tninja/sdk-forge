@@ -1,0 +1,54 @@
+name: ci
+
+# The forge's own gate. It is deliberately small and deliberately here rather than implied: this
+# repository decides which obligations become work items in eighteen other repositories, and until a
+# few minutes ago it had no tests of its own. A tool that files issues for a broken parser produces a
+# board that agrees with itself, which is the failure mode the portfolio keeps hitting.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet ruff mypy
+      # Scoped to the modules, deliberately: the 28 probe_* scratch files this repository inherited
+      # hold 152 ruff findings between them, and pretending otherwise would make the gate red on
+      # arrival and get it silenced on the first failure. They are scheduled for removal, not
+      # adopted. See PORTFOLIO.md and the workspace AGENTS.md rule on scratch.
+      - run: python -m ruff check forge.py names.py verify.py sync_roadmap.py
+      # Format is gated only on the files that are plain code. forge.py and names.py would both be
+      # reformatted, and they hold the template strings whose wrapping becomes the generated source of
+      # eighteen repositories: reformatting them is a change to every project, made from a CI job that
+      # looks like a lint run. That trade is not this gate's to make.
+      - run: python -m ruff format --check sync_roadmap.py verify.py
+      - run: python -m mypy sync_roadmap.py
+      - name: The sync tool must parse both roadmap shapes without touching the network
+        run: |
+          python - <<'PY'
+          import sync_roadmap as s
+
+          pkix = "| `anchors.load_anchor()` | RFC 5280 | `[ ]` | `tests/t.py::x` |\n"
+          certledger = "| `cl.ambient-trust` | Model I1 | `[x]` | `anchors.py` | `test_env` |\n"
+          a = s.rows_of(pkix)
+          b = s.rows_of(certledger)
+          assert a[0]["name"] == "anchors.load_anchor", a
+          assert a[0]["status"] == "[ ]", a
+          assert b[0]["name"] == "cl.ambient-trust", b
+          assert s.STATUSES[b[0]["status"]][1] == "close", b
+          assert b[0]["evidence"] == "test_env", b
+          assert s.milestones_of("- M7 vendor containers: x\n- not one\n") == {"M7": "vendor containers"}
+          assert s.rows_of("no matrix here") == []
+          print("shapes parse")
+          PY

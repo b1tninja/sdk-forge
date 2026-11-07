@@ -54,6 +54,7 @@ PROJECTS = [
     "bgpfeed",
     "routevalid",
     "lgc",
+    "miblang",
 ]
 
 GATES = ["compile", "pytest", "ruff", "format", "mypy"]

@@ -45,6 +45,9 @@ POSITION = {
     "srtpkit": (4, 5, ("asn1core",)),
     "cwmp": (4, 5, ()),
     "devicespy": (4, 5, ()),
+    # Tier 4, wave 5: created against the no-new-shells rule on 2026-11-07, which is why
+    # it is hold-tier despite a real gap: pysmi 2.0.0 occupies the job and is current.
+    "miblang": (4, 5, ("asn1core", "itulib")),
 }
 
 
@@ -156,6 +159,22 @@ DEPENDS_WHY = {
     ): "RFC 5764 key establishment presents certificates, and SRTP "
     "keys are only as strong as the identity that negotiated "
     "them, so certificate parsing stays in asn1core",
+    (
+        "miblang",
+        "asn1core",
+    ): "an SMIv2 module's SYNTAX and DEFAULT clauses are ASN.1 with a "
+    "tag-numbering scheme of its own, and a constraint that "
+    "asn1core cannot check would silently widen what a MIB "
+    "accepts, so the codec stays asn1core's and miblang keeps "
+    "the grammar",
+    (
+        "miblang",
+        "itulib",
+    ): "the modules this reads are normative artifacts published as "
+    "text alongside a Recommendation, and an OID answer is only "
+    "as good as the edition it was parsed from, so fetching, "
+    "digesting and pinning that corpus is itulib's job rather "
+    "than a second copy of it per project",
 }
 
 

@@ -205,6 +205,7 @@ PROJECT_ORDER = (
     "bgpfeed",
     "routevalid",
     "lgc",
+    "miblang",
 )
 
 

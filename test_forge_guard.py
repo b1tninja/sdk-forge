@@ -314,7 +314,17 @@ def test_the_clusters_hold_what_their_work_packages_edit():
         "shaken",
         "srtpkit",
     }
-    assert len(routing.PROJECTS) == 9
+    assert {p["name"] for p in routing.PROJECTS} >= {
+        "rpkit",
+        "asnkit",
+        "bgpfeed",
+        "routevalid",
+        "lgc",
+    }
+    # miblang joined this cluster on 2026-11-07: network management sits with the operations
+    # projects, not with naming or certificates. Count tripwire, so a split of the cluster
+    # has to say so here rather than fail as an unexplained diff.
+    assert len(routing.PROJECTS) == 10
     assert len(naming.PROJECTS) == 11
     for module in (routing, naming, certificate):
         own = {p["name"] for p in module.PROJECTS}

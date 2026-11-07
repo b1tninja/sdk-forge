@@ -15,10 +15,16 @@ imported the module to inspect it - which is what these tests do.
 
 from __future__ import annotations
 
+import ast
+import copy
+import importlib.util
 import pathlib
 import re
 
+import pytest
+
 import forge
+import sync_roadmap
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -86,3 +92,83 @@ def test_hygiene_gate_would_reject_the_scratch_it_shipped_before():
 
     assert h.SCRATCH_RE.search("probe_ber.py")
     assert not h.SCRATCH_RE.search("forge.py")
+
+
+# ---------------------------------------------------------------- template fixes (WP03)
+
+
+def _project(name):
+    return copy.deepcopy(next(p for p in forge.ALL_PROJECTS if p["name"] == name))
+
+
+def test_where_cells_name_a_collectable_test_marked_to_be_written():
+    rows = [
+        line
+        for line in forge.render_roadmap(
+            forge.normalize(_project("rpkit"))
+        ).splitlines()
+        if line.startswith("| `")
+    ]
+    assert rows
+    for row in rows:
+        fn = row.split("`")[1].split(".", 1)[1].removesuffix("()")
+        assert "`tests/test_obligations.py::test_" + fn + "` (to be written)" in row, (
+            row
+        )
+
+
+def test_the_matrix_emits_a_milestone_column_from_the_api_entry():
+    p = forge.normalize(_project("rpkit"))
+    first = p["api"][0]
+    p["api"] = [(*first[:6], "M2"), *(entry[:6] for entry in p["api"][1:])]
+    text = forge.render_roadmap(p)
+    assert "| Obligation | Spec | Status | Where | Milestone |" in text
+    rows = sync_roadmap.rows_of(text)
+    assert rows[0]["milestone"] == "M2"
+    assert all(row["milestone"] == "" for row in rows[1:]), (
+        "unplaced rows must not get an M-number"
+    )
+    assert rows[1]["where"].endswith("(to be written)")
+
+
+def test_readme_clone_line_is_a_clone_then_a_cd():
+    text = forge.render_readme(forge.normalize(_project("ntspy")))
+    assert (
+        "git clone https://github.com/" + forge.ORG + "/ntspy.git\ncd ntspy\n" in text
+    )
+
+
+def test_agents_invariant_names_the_status_and_column_the_matrix_uses():
+    text = forge.AGENTS_PROJECT
+    assert "`[ ]` to `[ok]`" in text
+    assert "`Where` cell" in text
+    assert "(to be written)" in text
+    assert "`Evidence` cell" not in text
+    assert "to `[x]`" not in text
+
+
+def test_security_workflow_audits_what_is_installed_without_resolving_it():
+    wf = forge.SECURITY_WF
+    audit = next(line for line in wf.splitlines() if "pip_audit" in line)
+    assert "--no-deps" in audit and "--disable-pip" in audit
+    assert "-r requirements-audit.txt" in audit
+
+
+def test_the_shell_count_is_read_not_written_in(monkeypatch):
+    assert not any("Twenty-eight" in rule for rule in forge.RULES)
+    monkeypatch.setattr(forge, "shell_count", lambda: 27)
+    assert "The READMEs of the 27 generated shells" in " ".join(
+        forge.rules_block().split()
+    )
+
+
+def test_polish_runs_on_a_staged_copy_and_leaves_valid_python():
+    if importlib.util.find_spec("ruff") is None:
+        pytest.skip("ruff is not installed")
+    files = forge.render_project(_project("sfields"), plan=False)
+    polished, notes = forge.polish("sfields", files)
+    assert notes == [], notes
+    assert set(polished) == set(files)
+    for rel, data in polished.items():
+        if rel.endswith(".py"):
+            ast.parse(data.decode("utf-8"))

@@ -1,22 +1,46 @@
-"""sdk-forge: generate and refresh the RFC-protocol SDK shells under D:/code.
+"""sdk-forge: generate and refresh the RFC-protocol SDK shells under D:/code (or FORGE_ROOT).
 
-Every managed artefact is produced from the PROJECTS table, so configuration and
-prose cannot drift between the eighteen projects. Rerunning rewrites managed
-files in place; hand-written module bodies and extra tests are left alone.
+Every managed artefact is produced from the per-project tables in forge_data/, so configuration and
+prose cannot drift between the generated projects. A rerun rewrites only the files the generator
+still owns: one it last wrote and nobody has edited since. A file that was edited, a project whose
+ROADMAP.md has a done row, and a module with no NotImplementedError left are kept, and reported.
+
+    python forge.py --check                      # write nothing; list what would change, exit 1 if any
+    python forge.py --check --diff --project pkix
+    python forge.py --only plan --project ntspy  # regenerate one project's docs/plan.md and nothing else
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
+import dataclasses
+import difflib
+import hashlib
+import json
+import os
 import pathlib
 import re
-import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from typing import Any
 
-ROOT = pathlib.Path("D:/code")
+from forge_data import certificate, naming, routing
+from forge_data.position import (
+    CANDIDATE_EDGES,
+    CANDIDATE_NOTE,
+    DEPENDS_WHY,
+    POSITION,
+    RULES,
+    TIER_NOTE,
+    WAVE_NOTE,
+)
+
+# The workspace the shells live in. FORGE_ROOT points the generator somewhere else - a scratch copy, or
+# a checkout on another machine - without editing this file.
+ROOT = pathlib.Path(os.environ.get("FORGE_ROOT") or "D:/code")
 HERE = pathlib.Path(__file__).resolve().parent
 LICENSE_SRC = HERE / "templates" / "LICENSE-2.0.txt"
 
@@ -114,13 +138,6 @@ def docstring(summary: str, body: str = "", indent: str = "") -> str:
     return "\n".join(lines)
 
 
-def write(path: pathlib.Path, text: str) -> None:
-    """Write managed text as ASCII prose with LF endings and one trailing newline."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = textwrap.dedent(ascii_prose(text)).strip("\n") + "\n"
-    path.write_bytes(body.replace("\r\n", "\n").encode())
-
-
 def table(header: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
     out = [
         "| " + " | ".join(header) + " |",
@@ -152,3429 +169,69 @@ def prior_rows(art: list[dict[str, str]]) -> str:
 
 def bullets(items: list[str]) -> str:
     return "\n".join("- " + i for i in items)
-# ---------------------------------------------------------------- clusters: RPKI and BGP
 
-PROJECTS_A: list[dict[str, Any]] = [
-    {
-        "name": "rpkit",
-        "pkg": "rpkit",
-        "title": "rpkit -- an RPKI relying party you can import",
-        "desc": "RPKI relying party: RRDP and repository fetch, CMS signed objects, manifests, "
-        "validation paths, ROA extraction and SLURM filtering",
-        "kw": [
-            "rpki",
-            "rrdp",
-            "signed-objects",
-            "manifests",
-            "rov",
-            "bgp",
-            "rfc9286",
-            "rfc9981",
-        ],
-        "why": (
-            "Python has no RPKI relying-party implementation at all. Validation, RRDP and "
-            "repository handling live in Rust (Routinator, rcynic) and C (rpki-client), so any "
-            "Python tool that wants origin validation today shells out to a daemon and parses "
-            "its output. The specification is also moving: RFC 9981 (2026-05) and RFC 9829 "
-            "(2025-07) both landed inside the last year and neither has a Python consumer. "
-            "rpkit is the importable relying party: fetch, verify, validate, with the "
-            "provenance of every assertion attached to the answer instead of assumed by the "
-            "caller."
-        ),
-        "docs": [
-            {
-                "n": "6480",
-                "status": "Informational",
-                "date": "2012-02",
-                "why": "the architecture: repositories, RAs, ROAs and relying-party duties",
-            },
-            {
-                "n": "8182",
-                "status": "Proposed Standard",
-                "date": "2017-07",
-                "why": "RRDP: notification, snapshot and delta files over HTTPS",
-            },
-            {
-                "n": "9697",
-                "status": "Proposed Standard",
-                "date": "2024-12",
-                "why": "detecting RRDP session desynchronisation",
-            },
-            {
-                "n": "6488",
-                "status": "Proposed Standard",
-                "date": "2012-02",
-                "why": "the SignedObject CMS wrapper every RPKI file wears",
-            },
-            {
-                "n": "9286",
-                "status": "Proposed Standard",
-                "date": "2022-06",
-                "why": "manifests: the anti-replay view of a publication point",
-            },
-            {
-                "n": "9981",
-                "status": "Proposed Standard",
-                "date": "2026-05",
-                "why": "manifest number behaviour at the 2**32 minus 1 boundary",
-            },
-            {
-                "n": "6487",
-                "status": "Proposed Standard",
-                "date": "2012-02",
-                "why": "resource certificate and CRL profile, relying-party path validation",
-            },
-            {
-                "n": "7935",
-                "status": "Proposed Standard",
-                "date": "2016-08",
-                "why": "the algorithms and key sizes a relying party must speak",
-            },
-            {
-                "n": "9691",
-                "status": "Proposed Standard",
-                "date": "2024-12",
-                "why": "trust anchor key (TAK) profile",
-            },
-            {
-                "n": "8416",
-                "status": "Proposed Standard",
-                "date": "2018-08",
-                "why": "SLURM: local filtering of validated assertions",
-            },
-        ],
-        "errata": [
-            "RFC 8182 carries 1 verified erratum and is updated by RFC 9674 and RFC 9697. Read all three before writing the RRDP client.",
-            "RFC 6487 carries 4 verified errata (algorithm and CRL number details; see also RFC 9829, 2025-07).",
-            "RFC 9286 carries 1 verified erratum. RFC 6486 is OBSOLETE and must never be cited as the manifest specification.",
-        ],
-        "prior": [
-            {
-                "name": "rov",
-                "version": "0.6.0",
-                "date": "2025-07-09",
-                "note": "offline batch ROV over IRR and dump files; no validator library, no RRDP, no RTR",
-            },
-            {
-                "name": "rpki",
-                "version": "-",
-                "date": "-",
-                "note": "name does not exist on PyPI (checked 2026-11-05)",
-            },
-            {
-                "name": "routinator, rpki-client, rcynic",
-                "version": "-",
-                "date": "-",
-                "note": "Rust and C daemons; no embeddable Python API",
-            },
-        ],
-        "gaps": [
-            "RRDP client with notification, snapshot and delta files, and RFC 9697 desync recovery",
-            "CMS signed-object decode and verification using the RFC 7935 algorithm profile",
-            "manifest enforcement including the RFC 9981 number boundary nobody implements yet",
-            "validation path walk with per-assertion reason codes: stale, revoked, suspended, filtered",
-            "SLURM filtering as a first-class testable step rather than a daemon option",
-        ],
-        "nongoals": [
-            "issuing certificates: this is a relying party, not a CA",
-            "talking to routers over RTR, which is rtrkit",
-            "IRR database parsing",
-            "being the fastest validator; correctness and provenance are the product",
-        ],
-        "mods": [
-            (
-                "anchors",
-                "trust anchors and TAKs: load, pin, expire (RFC 9691, RFC 6480)",
-            ),
-            (
-                "repository",
-                "publication point model, cache layout, rsync and RRDP selection (RFC 6480)",
-            ),
-            (
-                "rrdp",
-                "notification, snapshot and delta fetch plus desync recovery (RFC 8182, RFC 9697)",
-            ),
-            (
-                "signedobject",
-                "CMS SignedObject envelope decode and verification (RFC 6488)",
-            ),
-            (
-                "manifest",
-                "manifest objects, file hashes and number handling (RFC 9286, RFC 9981)",
-            ),
-            ("roa", "route origin authorisation objects: prefix, ASN, max length"),
-            ("validation", "certificate path and resource extension checks (RFC 6487)"),
-            ("slurm", "local exception filtering (RFC 8416)"),
-        ],
-        "api": [
-            (
-                "anchors",
-                "def",
-                "load_trust_anchor",
-                "path: pathlib.Path",
-                "TrustAnchor",
-                "RFC 9691",
-            ),
-            (
-                "repository",
-                "def",
-                "open_cache",
-                "root: pathlib.Path",
-                "Repository",
-                "RFC 6480",
-            ),
-            (
-                "rrdp",
-                "def",
-                "fetch_notification",
-                "uri: str",
-                "Notification",
-                "RFC 8182",
-            ),
-            (
-                "rrdp",
-                "def",
-                "apply_delta",
-                "state: SessionState, delta: DeltaFile",
-                "Repository",
-                "RFC 8182, RFC 9697",
-            ),
-            (
-                "signedobject",
-                "def",
-                "decode_signed_object",
-                "blob: bytes",
-                "SignedObject",
-                "RFC 6488",
-            ),
-            (
-                "manifest",
-                "def",
-                "check_manifest",
-                "manifest: SignedObject, files: dict",
-                "list of str",
-                "RFC 9286",
-            ),
-            (
-                "manifest",
-                "def",
-                "next_manifest_number",
-                "current: int",
-                "int",
-                "RFC 9981",
-            ),
-            (
-                "validation",
-                "def",
-                "validate_roa",
-                "roa: SignedObject, store: Repository",
-                "ValidationResult",
-                "RFC 6487",
-            ),
-            (
-                "validation",
-                "def",
-                "validate_origin",
-                "prefix: str, asn: int, roas: Iterable",
-                "RovState",
-                "RFC 6480",
-            ),
-            (
-                "slurm",
-                "def",
-                "apply_slurm",
-                "roas: Iterable, config: Slurm",
-                "Iterable",
-                "RFC 8416",
-            ),
-        ],
-        "steps": [
-            "M1 signed objects: RFC 6488 envelope plus RFC 7935 signature verification against live RIR data",
-            "M2 repository: RRDP notification, snapshot and delta, with RFC 9697 desync recovery",
-            "M3 manifests: hash verification, stale detection, RFC 9981 number boundary",
-            "M4 validation: path walk, resource extensions, ROA extraction, ROV result with reason codes",
-            "M5 SLURM filtering and the assertion stream rtrkit consumes",
-            "M6 publication: 0.1.0 on PyPI with a reproducible repository fixture in the sdist",
-        ],
-        "extras": {"xml": [("defusedxml", "0.7")]},
-        "cli": "rpkit validate 1.2.3.0/24 64512 -- state and every reason behind it",
-    },
-    {
-        "name": "rtrkit",
-        "pkg": "rtrkit",
-        "title": "rtrkit -- RPKI-to-Router protocol, both ends",
-        "desc": "RPKI-to-Router (RTR) version 0 and 1: cache server and router client, IPv4 and "
-        "IPv6 prefix and router-key records, serial notify and reset query",
-        "kw": [
-            "rpki",
-            "rtr",
-            "rov",
-            "bgp",
-            "rfc8210",
-            "rfc6810",
-            "router-key",
-            "cache-server",
-        ],
-        "why": (
-            "RTR is the only protocol between an RPKI cache and a router, and Python cannot "
-            "speak it. On PyPI there is nothing at all: rtr, rtrkit, rpki-rtr and rtr-client "
-            "were all absent when checked on 2026-11-05. rtrkit is deliberately the small half "
-            "of the problem. It validates nothing; it moves already validated assertions over a "
-            "socket with the right serial discipline, which is exactly what makes it testable "
-            "against a real router without needing a repository, and what lets rpkit stay a "
-            "validator instead of growing a server."
-        ),
-        "docs": [
-            {
-                "n": "8210",
-                "status": "Proposed Standard",
-                "date": "2017-09",
-                "why": "RTR version 1: PDU set, record types, error handling",
-            },
-            {
-                "n": "6810",
-                "status": "Proposed Standard",
-                "date": "2013-01",
-                "why": "version 0, still what most routers speak",
-            },
-            {
-                "n": "6480",
-                "status": "Informational",
-                "date": "2012-02",
-                "why": "where a cache server sits and what it must deliver",
-            },
-            {
-                "n": "9324",
-                "status": "Proposed Standard",
-                "date": "2022-12",
-                "why": "why fresh RPKI data must not trigger a BGP route refresh",
-            },
-        ],
-        "errata": [
-            "RFC 6810 is updated by RFC 8210. Implement 8210 and negotiate down to 0 rather than writing two stacks.",
-            "RFC 8210 reports no errata as of 2026-10-29. Re-check before the M1 freeze.",
-        ],
-        "prior": [
-            {
-                "name": "rov",
-                "version": "0.6.0",
-                "date": "2025-07-09",
-                "note": "batch validator, no RTR",
-            },
-            {
-                "name": "FRR and BIRD RTR clients",
-                "version": "-",
-                "date": "-",
-                "note": "C daemons, not importable code",
-            },
-            {
-                "name": "rtr, rpki-rtr, rtr-client",
-                "version": "-",
-                "date": "-",
-                "note": "absent from PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "cache server: serial discipline, reset query, cache notify, refresh and retry timers",
-            "router client: IPv4 and IPv6 prefix records plus router-key records with the error PDU contract",
-            "incremental and diff-only update modes that a validator like rpkit can drive directly",
-            "a fault injector for truncated records, serial wrap and reset-query storms, the bugs routers actually ship with",
-        ],
-        "nongoals": [
-            "repository access or validation, which is rpkit",
-            "BGP itself, which is asnkit",
-            "MRT files",
-        ],
-        "mods": [
-            ("pdu", "RTR PDU framing and every record type (RFC 8210)"),
-            (
-                "serialize",
-                "endian-exact encode and decode, hostile input refusal (RFC 8210, RFC 6810)",
-            ),
-            (
-                "session",
-                "client and server state machine: version negotiation, serials, timers (RFC 8210)",
-            ),
-            ("inject", "fault injection helpers for conformance testing"),
-        ],
-        "api": [
-            ("serialize", "def", "decode_pdu", "raw: bytes", "Pdu", "RFC 8210"),
-            (
-                "serialize",
-                "def",
-                "encode_reset_query",
-                "session_id: int",
-                "ResetQuery",
-                "RFC 8210",
-            ),
-            (
-                "serialize",
-                "def",
-                "encode_ipv4_prefix_record",
-                "prefix: str, asn: int, max_len: int, flags: int",
-                "PrefixRecord",
-                "RFC 8210",
-            ),
-            (
-                "serialize",
-                "def",
-                "encode_router_key_record",
-                "asn: int, ski: bytes, spki: bytes",
-                "RouterKeyRecord",
-                "RFC 8210",
-            ),
-            (
-                "session",
-                "def",
-                "serve",
-                "store: AssertionStore, host: str, port: int",
-                "None",
-                "RFC 8210",
-            ),
-            (
-                "session",
-                "async def",
-                "connect",
-                "host: str, port: int",
-                "RouterClient",
-                "RFC 8210",
-            ),
-            (
-                "inject",
-                "def",
-                "truncated_record",
-                "payload: bytes, keep: int",
-                "bytes",
-                "design",
-            ),
-        ],
-        "steps": [
-            "M1 PDU codec, byte-exact, with fuzzed-input refusal",
-            "M2 client session: reset query, serial notify, record application",
-            "M3 server session: timers, cache notify, error PDUs, concurrent routers",
-            "M4 fault injection suite and a loopback conformance test against itself",
-            "M5 drive it from an rpkit assertion stream end to end",
-            "M6 publication: 0.1.0 with the conformance trace in the docs",
-        ],
-        "extras": {},
-        "cli": "rtrkit serve --listen 127.0.0.1:8323 -- source a store and watch routers attach",
-    },
-    {
-        "name": "asnkit",
-        "pkg": "asnkit",
-        "title": "asnkit -- prefix to ASN, current and historical",
-        "desc": "MRT RIB table parsing, radix longest-prefix match and historical AS lookups "
-        "with optional route origin validation state joined in",
-        "kw": ["bgp", "mrt", "rib", "asn", "prefix", "radix", "lpm", "rov"],
-        "why": (
-            "pyasn is the tool everyone uses and it stopped moving in 2023: 1.6.2, 2023-09-01, "
-            "a C extension out of a Python 2 lineage with no type hints, no async and no ROV "
-            "state. MRT parsing alone is covered by a dozen one-off scripts; what is missing is "
-            "a typed library that answers the question an operator actually asks, which AS, on "
-            "which date, and what did RPKI say about it, while streaming its input instead of "
-            "demanding a build step. The RIB index sits behind an interface so the pure-Python "
-            "radix and an optional native one are interchangeable."
-        ),
-        "docs": [
-            {
-                "n": "6396",
-                "status": "Proposed Standard",
-                "date": "2011-10",
-                "why": "MRT format: table dumps, BGP messages, state changes",
-            },
-            {
-                "n": "4271",
-                "status": "Draft Standard",
-                "date": "2006-01",
-                "why": "UPDATE and path attribute semantics inside a table dump",
-            },
-            {
-                "n": "6480",
-                "status": "Informational",
-                "date": "2012-02",
-                "why": "what a validation state joined onto a RIB row means",
-            },
-            {
-                "n": "8210",
-                "status": "Proposed Standard",
-                "date": "2017-09",
-                "why": "a live feed via rtrkit instead of a static dump",
-            },
-        ],
-        "errata": [
-            "RFC 4271 carries 9 verified errata and 12 updates. Consult them before trusting any UPDATE parsing recipe copied from a blog post.",
-            "RFC 6396 carries 2 verified errata.",
-        ],
-        "prior": [
-            {
-                "name": "pyasn",
-                "version": "1.6.2",
-                "date": "2023-09-01",
-                "note": "the incumbent: C extension, no typing, no ROV, a build-a-db step",
-            },
-            {
-                "name": "netflow",
-                "version": "0.12.2",
-                "date": "2023-08-20",
-                "note": "flow export codecs, adjacent rather than overlapping",
-            },
-            {
-                "name": "py-radix",
-                "version": "-",
-                "date": "-",
-                "note": "a trie primitive; no MRT, no history",
-            },
-        ],
-        "gaps": [
-            "a streaming TABLE_DUMP_V2 reader that never loads a whole RIB into memory",
-            "historical lookups by date from the same index, without a per-archive build step",
-            "validation state joined at query time from rtrkit or an rpkit assertion set",
-            "typed API with an explicit provenance field on every answer",
-        ],
-        "nongoals": [
-            "a BGP speaker or session FSM",
-            "flow data",
-            "a hosted API that hides where the answer came from",
-        ],
-        "mods": [
-            ("mrt", "MRT record and subtype framing (RFC 6396)"),
-            (
-                "rib",
-                "TABLE_DUMP_V2 view, prefix and AS_PATH records (RFC 6396, RFC 4271)",
-            ),
-            ("lpm", "radix tree with longest-prefix match and a stable iterator"),
-            ("history", "date-scoped indexes over multiple RIB dumps"),
-            (
-                "rov",
-                "origin validation join from rtrkit or an rpkit assertion set (RFC 6480)",
-            ),
-        ],
-        "api": [
-            ("mrt", "def", "iter_records", "stream: IO", "Iterator", "RFC 6396"),
-            ("rib", "def", "iter_rib_entries", "dump: IO", "Iterator", "RFC 6396"),
-            (
-                "lpm",
-                "def",
-                "longest_match",
-                "tree: Radix, address: str",
-                "Optional[RibEntry]",
-                "RFC 6396",
-            ),
-            ("lpm", "def", "build_radix", "entries: Iterable", "Radix", "design"),
-            (
-                "history",
-                "def",
-                "lookup_asn",
-                "archive: Archive, address: str, when: datetime.date",
-                "list",
-                "design",
-            ),
-            (
-                "rov",
-                "def",
-                "annotate",
-                "entries: Iterable, feed: RovFeed",
-                "Iterable",
-                "RFC 6480",
-            ),
-        ],
-        "steps": [
-            "M1 MRT reader for TABLE_DUMP_V2 with a streaming test corpus",
-            "M2 radix LPM with a pure-Python reference and a native fast path behind the interface",
-            "M3 date-scoped history over several RIB dumps",
-            "M4 validation join from rtrkit, with reason codes carried into the answer",
-            "M5 CLI parity with pyasn so a migration is a one-line change",
-            "M6 publication: 0.1.0 with a migration note from pyasn",
-        ],
-        "extras": {"fast": [("msgspec", "0.19")]},
-        "cli": "asnkit lookup 8.8.8.8 -- asn, prefix, source RIB and validation state",
-    },
-]
-# ------------------------------------------------- clusters: QUIC tunnels and service discovery
 
-PROJECTS_B: list[dict[str, Any]] = [
-    {
-        "name": "h3tunnel",
-        "pkg": "h3tunnel",
-        "title": "h3tunnel -- CONNECT-UDP and CONNECT-IP in Python",
-        "desc": "MASQUE tunnels: HTTP Datagrams and the Capsule Protocol, CONNECT-UDP and "
-        "CONNECT-IP clients, and the proxy side that terminates them",
-        "kw": [
-            "masque",
-            "connect-udp",
-            "connect-ip",
-            "http3",
-            "quic",
-            "proxy",
-            "rfc9298",
-            "rfc9484",
-        ],
-        "why": (
-            "MASQUE is how UDP is proxied over HTTP today, and Python cannot speak it. The "
-            "closest thing on PyPI is pymasque (0.1.2, 2026-11-04), which implements Cloudflare "
-            "WARP's undocumented L4 mode from a gist: TCP only, client only, no proxy side, and "
-            "compliant with neither RFC 9298 nor RFC 9484. The transport problem is already "
-            "solved twice over, since aioquic 1.7.2 (2026-11-02) and qh3 2.1.0 (2026-10-25) "
-            "both ship sans-IO and asyncio APIs with QUIC DATAGRAM support. What is missing is "
-            "precisely the layer above them: capsules, context identifiers and the two CONNECT "
-            "profiles. h3tunnel keeps that layer sans-IO, so it is testable with no QUIC stack "
-            "at all and the transport stays an adapter.",
-        ),
-        "docs": [
-            {
-                "n": "9297",
-                "status": "Proposed Standard",
-                "date": "2022-08",
-                "why": "HTTP Datagrams and the Capsule Protocol, the framing everything else uses",
-            },
-            {
-                "n": "9298",
-                "status": "Proposed Standard",
-                "date": "2022-08",
-                "why": "CONNECT-UDP: request syntax, context identifiers, proxy behaviour",
-            },
-            {
-                "n": "9484",
-                "status": "Proposed Standard",
-                "date": "2023-10",
-                "why": "CONNECT-IP: whole IP packets through the same tunnel",
-            },
-            {
-                "n": "9221",
-                "status": "Proposed Standard",
-                "date": "2022-03",
-                "why": "the QUIC DATAGRAM extension HTTP Datagrams ride on",
-            },
-            {
-                "n": "9114",
-                "status": "Proposed Standard",
-                "date": "2022-06",
-                "why": "HTTP/3 stream and setting rules the tunnels live inside",
-            },
-            {
-                "n": "9220",
-                "status": "Proposed Standard",
-                "date": "2022-06",
-                "why": "extended CONNECT over HTTP/3, the pattern this reuses",
-            },
-            {
-                "n": "9931",
-                "status": "Proposed Standard",
-                "date": "2025-09",
-                "why": "what may be sent optimistically before the response arrives",
-            },
-        ],
-        "errata": [
-            "RFC 9484 verified erratum 8444, sec. 4.6: the wildcard value for target and ipproto MUST be percent-encoded, so it travels as %2A. Examples in sec. 4.2 and 4.4 are corrected too. Get this wrong and CONNECT-IP does not interoperate.",
-            "RFC 9931 updates RFC 9298 sec. 5: optimistic sending before the response is allowed in HTTP/2 and HTTP/3 but not in HTTP/1.1.",
-            "RFC 9297 and RFC 9298 report no errata as of 2026-10-29.",
-        ],
-        "prior": [
-            {
-                "name": "pymasque",
-                "version": "0.1.2",
-                "date": "2026-11-04",
-                "note": "Cloudflare WARP L4 mode only: TCP only, client only",
-            },
-            {
-                "name": "aioquic",
-                "version": "1.7.2",
-                "date": "2026-11-02",
-                "note": "the transport underneath, sans-IO plus asyncio; not a tunnel",
-            },
-            {
-                "name": "qh3",
-                "version": "2.1.0",
-                "date": "2026-10-25",
-                "note": "maintained aioquic fork, Rust core, datagrams and WebTransport",
-            },
-            {
-                "name": "connect-udp, masque-proxy, capsule",
-                "version": "-",
-                "date": "-",
-                "note": "all absent from PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "CONNECT-UDP client and proxy in one library, including the server duties of RFC 9298 sec. 3.1",
-            "CONNECT-IP with the erratum-correct URI template (RFC 9484)",
-            "the Capsule Protocol, so one tunnel works over HTTP/1.1 and HTTP/2 as well (RFC 9297)",
-            "context identifier demultiplexing under the MTU and ECN rules of RFC 9298 sec. 6",
-            "a transport-neutral core: qh3 and aioquic as adapters, never as the design centre",
-        ],
-        "nongoals": [
-            "a QUIC implementation: aioquic and qh3 already are one, and this is not a third",
-            "WARP's proprietary L4 mode or its authentication scheme",
-            "a full VPN: CONNECT-IP moves packets, it does not negotiate an address with a peer",
-        ],
-        "mods": [
-            ("capsule", "capsule framing and the registered capsule types (RFC 9297)"),
-            (
-                "httpdatagram",
-                "HTTP Datagram payload with the context identifier (RFC 9298 sec. 5)",
-            ),
-            (
-                "ctx",
-                "context identifier allocation and demultiplexing (RFC 9298 sec. 4)",
-            ),
-            (
-                "connect_udp",
-                "CONNECT-UDP request and response construction (RFC 9298 sec. 3)",
-            ),
-            ("connect_ip", "CONNECT-IP URI template and IP packet framing (RFC 9484)"),
-            (
-                "limits",
-                "MTU, ECN and optimistic-send rules (RFC 9298 sec. 6, RFC 9931)",
-            ),
-            ("sansio", "transport-neutral tunnel state machine"),
-            ("aio", "asyncio client and proxy server over a pluggable QUIC adapter"),
-        ],
-        "api": [
-            (
-                "capsule",
-                "def",
-                "encode_capsule",
-                "capsule_type: int, body: bytes",
-                "Capsule",
-                "RFC 9297",
-            ),
-            ("capsule", "def", "decode_capsule", "payload: bytes", "tuple", "RFC 9297"),
-            (
-                "httpdatagram",
-                "def",
-                "encode_datagram",
-                "context_id: int, payload: bytes",
-                "HttpDatagram",
-                "RFC 9298 sec. 5",
-            ),
-            (
-                "ctx",
-                "def",
-                "allocate_context",
-                "tunnel: Tunnel",
-                "ContextId",
-                "RFC 9298 sec. 4",
-            ),
-            (
-                "connect_udp",
-                "def",
-                "build_request",
-                "target: Target, authority: str, uri: str",
-                "ConnectRequest",
-                "RFC 9298 sec. 3",
-            ),
-            (
-                "connect_ip",
-                "def",
-                "target_uri",
-                "target: Optional[str], ipproto: Optional[str]",
-                "str",
-                "RFC 9484 sec. 4.6",
-            ),
-            (
-                "limits",
-                "def",
-                "clamp_payload",
-                "mtu: int, tunnel_overhead: int",
-                "int",
-                "RFC 9298 sec. 6.1",
-            ),
-            (
-                "sansio",
-                "def",
-                "on_datagram",
-                "data: bytes, now: float",
-                "list",
-                "RFC 9298",
-            ),
-            (
-                "aio",
-                "async def",
-                "open_udp_tunnel",
-                "proxy: str, target: tuple",
-                "UdpTunnel",
-                "RFC 9298",
-            ),
-            (
-                "aio",
-                "async def",
-                "serve_proxy",
-                "host: str, port: int, policy: ProxyPolicy",
-                "None",
-                "RFC 9298 sec. 3.1",
-            ),
-        ],
-        "steps": [
-            "M1 signed codecs first: capsule and HTTP Datagram framing against byte-exact vectors",
-            "M2 sans-IO client state machine including context identifier lifecycle",
-            "M3 asyncio client over the qh3 adapter, verified against a local proxy",
-            "M4 proxy server: RFC 9298 sec. 3.1 handling, limits, graceful teardown",
-            "M5 CONNECT-IP with erratum 8444 percent-encoding and an IP packet codec",
-            "M6 publication: 0.1.0 with an interoperability trace against a non-Python proxy",
-        ],
-        "extras": {"quic": [("qh3", "2.1")], "aioquic": [("aioquic", "1.7")]},
-        "cli": "h3tunnel udp --proxy https://proxy:4433 --listen 127.0.0.1:5354 --target 1.1.1.1:53",
-    },
-    {
-        "name": "dnssd-srp",
-        "pkg": "dnssd_srp",
-        "title": "dnssd-srp -- DNS-SD without multicast",
-        "desc": "Service Registration Protocol (SRP) requester and registrar checks, DNS Push "
-        "Notifications, and the DNS Stateful Operations session both depend on",
-        "kw": [
-            "dns-sd",
-            "srp",
-            "mdns",
-            "dso",
-            "push-notifications",
-            "rfc9665",
-            "rfc8765",
-            "rfc8490",
-        ],
-        "why": (
-            "The multicast answer to local service discovery already has a strong Python owner "
-            "(zeroconf 0.153.0, 2026-10-31) and this project does not compete with it. RFC 9665 "
-            "moved DNS-SD to unicast authenticated updates in 2025-06, and RFC 8765 gave "
-            "clients pushed record changes over a persistent stateful session. Nothing on PyPI "
-            "speaks any of RFC 9665, RFC 8765, RFC 8490 or RFC 8766. namespy, the DNS library "
-            "this is designed beside, states plainly that mDNS and DNS-SD are not spoken "
-            "anywhere in it, so the message layer can be shared while the stateful half is "
-            "built here.",
-        ),
-        "docs": [
-            {
-                "n": "9665",
-                "status": "Proposed Standard",
-                "date": "2025-06",
-                "why": "SRP: unicast DNS-SD with SIG(0) defended registrations",
-            },
-            {
-                "n": "8765",
-                "status": "Proposed Standard",
-                "date": "2020-06",
-                "why": "DNS Push Notifications for records that change",
-            },
-            {
-                "n": "8490",
-                "status": "Proposed Standard",
-                "date": "2019-03",
-                "why": "DSO: the persistent session and TLV layer both ride",
-            },
-            {
-                "n": "8766",
-                "status": "Proposed Standard",
-                "date": "2020-06",
-                "why": "discovery proxy bridging a link into unicast DNS-SD",
-            },
-            {
-                "n": "2931",
-                "status": "Proposed Standard",
-                "date": "2000-09",
-                "why": "SIG(0) request signatures that defend a registration",
-            },
-            {
-                "n": "6763",
-                "status": "Proposed Standard",
-                "date": "2013-02",
-                "why": "DNS-SD naming, plus the domain enumeration that finds a registrar",
-            },
-            {
-                "n": "6762",
-                "status": "Proposed Standard",
-                "date": "2013-02",
-                "why": "mDNS, the world a discovery proxy bridges from",
-            },
-        ],
-        "errata": [
-            "RFC 8765 verified erratum 8560, sec. 6.5: for servers that do not implement RECONFIRM it MUST be silently ignored. The published text said a NOERROR response, which RFC 8490 forbids on a unidirectional DSO message.",
-            "RFC 9665 and RFC 8490 report no errata as of 2026-10-29.",
-            "RFC 6763 is updated by RFC 8553; RFC 6762 has 2 errata on file, none verified.",
-        ],
-        "prior": [
-            {
-                "name": "zeroconf",
-                "version": "0.153.0",
-                "date": "2026-10-31",
-                "note": "the multicast responder; no SRP, no DSO, no push",
-            },
-            {
-                "name": "dnspython",
-                "version": "2.9.2",
-                "date": "2026-11-03",
-                "note": "message and DNSSEC plumbing; no stateful sessions",
-            },
-            {
-                "name": "srp",
-                "version": "1.0.22",
-                "date": "2024-11-01",
-                "note": "Secure Remote Password: an unrelated protocol wearing this acronym",
-            },
-            {
-                "name": "dnssd-srp, srpkit, srpd, discovery-proxy",
-                "version": "-",
-                "date": "-",
-                "note": "all absent from PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "SRP update construction and the registrar-side validation of RFC 9665 sec. 3.3",
-            "TTL consistency and lease maintenance rules, RFC 9665 sec. 4 and sec. 5",
-            "SIG(0) signing with the algorithm RFC 9665 sec. 6.6 requires",
-            "DSO session management: keepalive, idle timeout and padding (RFC 8490)",
-            "push notification subscriptions (RFC 8765) and a discovery proxy front (RFC 8766)",
-        ],
-        "nongoals": [
-            "an mDNS responder: zeroconf owns the multicast link",
-            "a recursive resolver, which is what namespy is",
-            "a full DNS server: the registrar half is the update path, not a zone implementation",
-        ],
-        "mods": [
-            ("dso", "DSO message and TLV codec, session timers (RFC 8490)"),
-            (
-                "session",
-                "stream transport, keepalive, idle timeout, padding (RFC 8490)",
-            ),
-            ("srp", "SRP update construction (RFC 9665 sec. 3)"),
-            (
-                "registrar",
-                "update validation and lease maintenance (RFC 9665 sec. 3.3, sec. 4, sec. 5)",
-            ),
-            ("sig0", "SIG(0) sign and verify (RFC 2931, RFC 9665 sec. 6.6)"),
-            ("push", "subscribe and replay protection (RFC 8765)"),
-            ("proxy", "discovery proxy data translation (RFC 8766)"),
-            (
-                "discovery",
-                "registration domain enumeration and registrar SRV lookup (RFC 6763, RFC 9665 sec. 3.1.1)",
-            ),
-        ],
-        "api": [
-            ("dso", "def", "encode_dso", "message: DsoMessage", "bytes", "RFC 8490"),
-            (
-                "session",
-                "async def",
-                "open_session",
-                "resolver: tuple",
-                "DsoSession",
-                "RFC 8490",
-            ),
-            (
-                "srp",
-                "def",
-                "build_update",
-                "service: ServiceDefinition, lease: Lease",
-                "bytes",
-                "RFC 9665 sec. 3",
-            ),
-            (
-                "sig0",
-                "def",
-                "sign",
-                "message: bytes, key: SigningKey",
-                "bytes",
-                "RFC 2931, RFC 9665 sec. 6.6",
-            ),
-            (
-                "sig0",
-                "def",
-                "verify",
-                "message: bytes, signature: bytes, key: VerifyKey",
-                "bool",
-                "RFC 2931",
-            ),
-            (
-                "registrar",
-                "def",
-                "validate_update",
-                "update: bytes, zone: ZoneContext",
-                "ValidationOutcome",
-                "RFC 9665 sec. 3.3",
-            ),
-            (
-                "registrar",
-                "def",
-                "ttl_for",
-                "lease_seconds: int",
-                "int",
-                "RFC 9665 sec. 4",
-            ),
-            (
-                "push",
-                "async def",
-                "subscribe",
-                "session: DsoSession, name: str, rrtype: str",
-                "AsyncIterator",
-                "RFC 8765",
-            ),
-            (
-                "discovery",
-                "def",
-                "registrar_from_zone",
-                "zone_apex: str",
-                "RegistrarEndpoint",
-                "RFC 9665 sec. 3.1.1",
-            ),
-        ],
-        "steps": [
-            "M1 DSO codec and session with malformed-input refusal",
-            "M2 SIG(0) sign and verify with the RFC 9665 sec. 6.6 algorithm",
-            "M3 SRP requester: lease, TTL, keep-alive and teardown",
-            "M4 registrar-side validation per RFC 9665 sec. 3.3, including the sec. 5 cleanup rules",
-            "M5 push subscriptions, with erratum 8560 RECONFIRM behaviour",
-            "M6 discovery proxy front end, then publication: 0.1.0",
-        ],
-        "extras": {"crypto": [("cryptography", "50.0.2")]},
-        "cli": "dnssd-srp register --name printer --type _printer._tcp --port 515",
-    },
-    {
-        "name": "turnkit",
-        "pkg": "turnkit",
-        "title": "turnkit -- STUN, TURN and ICE on asyncio",
-        "desc": "STUN messaging and long-term credentials, TURN allocations with permissions and "
-        "channels, and an ICE agent written to RFC 8445 with Trickle ICE and ICE PAC",
-        "kw": [
-            "stun",
-            "turn",
-            "ice",
-            "nat",
-            "webrtc",
-            "rfc8489",
-            "rfc8656",
-            "rfc8445",
-            "rfc8838",
-        ],
-        "why": (
-            "The NAT traversal stack has a Python owner, but a narrow one. aioice 0.12.1 "
-            "(2026-11-03) is written for aiortc: one ICE agent with a private TURN "
-            "implementation bolted on, and its own summary still cites RFC 5245, which RFC 8445 "
-            "obsoleted in 2018, plus RFC 8863, which changed when an agent may declare failure. "
-            "stun 1.1.0 (2026-08-01) is a message library, and pystun3 plus aiostun answer only "
-            "the NAT-type question. turnkit is the reusable half nobody has: a TURN client API "
-            "with its own allocation lifecycle, and an ICE agent whose spec anchors are the "
-            "current documents rather than the ones a 2018 codebase inherited.",
-        ),
-        "docs": [
-            {
-                "n": "8489",
-                "status": "Proposed Standard",
-                "date": "2020-02",
-                "why": "STUN: transactions, attributes, MESSAGE-INTEGRITY, FINGERPRINT",
-            },
-            {
-                "n": "8656",
-                "status": "Proposed Standard",
-                "date": "2020-02",
-                "why": "TURN: allocations, permissions, channels, the relayed path",
-            },
-            {
-                "n": "8445",
-                "status": "Proposed Standard",
-                "date": "2018-07",
-                "why": "ICE: candidate gathering, checks, nomination",
-            },
-            {
-                "n": "8838",
-                "status": "Proposed Standard",
-                "date": "2021-01",
-                "why": "Trickle ICE: incremental candidates and early checks",
-            },
-            {
-                "n": "8863",
-                "status": "Proposed Standard",
-                "date": "2021-01",
-                "why": "ICE PAC: the minimum wait before declaring failure",
-            },
-            {
-                "n": "7635",
-                "status": "Proposed Standard",
-                "date": "2015-08",
-                "why": "third-party authorization, the TURN REST credential model",
-            },
-            {
-                "n": "8016",
-                "status": "Proposed Standard",
-                "date": "2016-11",
-                "why": "allocation mobility across an address change",
-            },
-        ],
-        "errata": [
-            "RFC 8489 carries 3 verified errata.",
-            "RFC 8445 is updated by RFC 8863, and RFC 8656 is the successor to RFC 5766 and RFC 6156: do not copy recipes from either predecessor.",
-            "RFC 8838 and RFC 8863 report no errata as of 2026-10-29.",
-        ],
-        "prior": [
-            {
-                "name": "aioice",
-                "version": "0.12.1",
-                "date": "2026-11-03",
-                "note": "aiortc's ICE agent with a private TURN client; summary cites the obsoleted RFC 5245",
-            },
-            {
-                "name": "stun",
-                "version": "1.1.0",
-                "date": "2026-08-01",
-                "note": "STUN messages and attributes; no TURN or ICE",
-            },
-            {
-                "name": "aiostun",
-                "version": "0.6.1",
-                "date": "2026-01-08",
-                "note": "STUN client over UDP, TCP and TLS",
-            },
-            {
-                "name": "pyturn",
-                "version": "0.2.4.1",
-                "date": "2024-03-25",
-                "note": "test-grade STUN and TURN client",
-            },
-            {
-                "name": "turnkit, aiturn, stun-client, iceagent",
-                "version": "-",
-                "date": "-",
-                "note": "all absent from PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "a TURN client usable without importing a media stack: allocate, permission, channel, refresh",
-            "transport coverage in one place: UDP, TCP, TLS and the ALPN negotiation that picks them",
-            "an ICE agent anchored on RFC 8445 plus RFC 8838 and the RFC 8863 failure-wait rule",
-            "REST credentials per RFC 7635 and allocation mobility per RFC 8016",
-            "a sans-IO agent core so check scheduling can be tested on a virtual clock",
-        ],
-        "nongoals": [
-            "a WebRTC stack or any SDP handling",
-            "DTLS-SRTP or media of any kind: the relayed path is opaque here",
-            "a TURN server, which is an operational product rather than a client library",
-        ],
-        "mods": [
-            ("message", "STUN message, attribute and integrity codec (RFC 8489)"),
-            ("transport", "UDP, TCP and TLS transports with framing (RFC 8489)"),
-            (
-                "allocation",
-                "TURN allocate, refresh, lifetime and reallocation (RFC 8656)",
-            ),
-            ("permission", "permissions and channel bindings (RFC 8656)"),
-            (
-                "credentials",
-                "long-term credentials, nonce handling, REST tokens (RFC 8489, RFC 7635)",
-            ),
-            ("ice", "ICE agent: candidates, check scheduling, nomination (RFC 8445)"),
-            ("trickle", "incremental candidate exchange (RFC 8838)"),
-            ("sansio", "pure agent core for virtual clock testing"),
-        ],
-        "api": [
-            (
-                "message",
-                "def",
-                "encode_message",
-                "msg: StunMessage, key: Optional[bytes]",
-                "bytes",
-                "RFC 8489",
-            ),
-            (
-                "message",
-                "def",
-                "decode_message",
-                "raw: bytes",
-                "StunMessage",
-                "RFC 8489",
-            ),
-            (
-                "allocation",
-                "async def",
-                "allocate",
-                "server: Endpoint, credentials: Credentials",
-                "Allocation",
-                "RFC 8656",
-            ),
-            (
-                "allocation",
-                "async def",
-                "refresh",
-                "allocation: Allocation",
-                "Allocation",
-                "RFC 8656",
-            ),
-            (
-                "permission",
-                "def",
-                "create_permission",
-                "allocation: Allocation, peer: tuple",
-                "Permission",
-                "RFC 8656",
-            ),
-            (
-                "credentials",
-                "def",
-                "rest_credentials",
-                "username: str, secret: bytes, now: float",
-                "Credentials",
-                "RFC 7635",
-            ),
-            (
-                "ice",
-                "def",
-                "gather_candidates",
-                "interfaces: list, relay: Optional[Allocation]",
-                "list",
-                "RFC 8445",
-            ),
-            (
-                "ice",
-                "def",
-                "schedule_checks",
-                "pairs: list, state: AgentState",
-                "list",
-                "RFC 8445",
-            ),
-            (
-                "sansio",
-                "def",
-                "on_binding_response",
-                "event: Received, now: float",
-                "AgentState",
-                "RFC 8445, RFC 8863",
-            ),
-            (
-                "trickle",
-                "def",
-                "encode_end_of_candidates",
-                "component: int",
-                "bytes",
-                "RFC 8838",
-            ),
-        ],
-        "steps": [
-            "M1 STUN codec, integrity and fingerprint against published vectors",
-            "M2 transports: UDP, TCP, TLS, with framing and timeout policy",
-            "M3 TURN allocation lifecycle including 401 nonce replay and refresh",
-            "M4 permissions and channels, then RFC 8016 mobility",
-            "M5 sans-IO ICE agent with RFC 8863 failure timing, then trickle",
-            "M6 publication: 0.1.0 with a relay interoperability trace",
-        ],
-        "extras": {},
-        "cli": "turnkit allocate --server turn:example.net:3478 --rest-user u --rest-secret env:SECRET",
-    },
-]
-# ------------------------------------------------- clusters: address assignment and provisioning
+# ---------------------------------------------------------------------------- project data
+#
+# The per-project tables live in forge_data/, one module per cluster, so an edit to a project's data
+# cannot touch the logic in this file and a change here cannot quietly rewrite a row. PROJECT_ORDER is
+# the order a full run and the index table use; it is checked against the data rather than trusted.
+PROJECT_ORDER = (
+    "rpkit",
+    "rtrkit",
+    "asnkit",
+    "h3tunnel",
+    "dnssd-srp",
+    "turnkit",
+    "leasespy",
+    "cwmp",
+    "devicespy",
+    "ohttp",
+    "ntspy",
+    "tacacs",
+    "signeddata",
+    "pgpenv",
+    "syslogkit",
+    "sfields",
+    "shaken",
+    "srtpkit",
+    "pkix",
+    "revokekit",
+    "enrollkit",
+    "ctspy",
+    "pathattr",
+    "bmpkit",
+    "rpslkit",
+    "bgpfeed",
+    "routevalid",
+    "lgc",
+)
 
-PROJECTS_C: list[dict[str, Any]] = [
-    {
-        "name": "leasespy",
-        "pkg": "leasespy",
-        "title": "leasespy -- DHCP clients, servers and relays on asyncio",
-        "desc": "DHCPv4 and DHCPv6 on asyncio: sans-IO state machines, the option registry, "
-        "relay agents with option 82, leasequery and the failover peer protocol",
-        "kw": [
-            "dhcp",
-            "dhcpv6",
-            "dhcpv4",
-            "relay",
-            "leasequery",
-            "failover",
-            "rfc9915",
-            "rfc2131",
-        ],
-        "why": (
-            "DHCPv6 was reissued in January 2026 as RFC 9915, an Internet Standard (STD 102) "
-            "that obsoletes RFC 8415 and deliberately removes IA_TA and the server unicast "
-            "option. No implementation in any language has finished that transition, and no "
-            "Python library is written against it. The Python field is contested but shallow: "
-            "pydhcp 0.9.1 (2026-10-21) is young and IPv4-first, dhcpkit 1.0.7 has not moved "
-            "since 2017, pydhcplib stopped in 2014, and dhcpy 0.0.7 drives the Kea control API "
-            "rather than the protocol. leasespy takes the ground nobody holds: the relay and "
-            "failover half of DHCP, where an operator's problem actually lives.",
-        ),
-        "docs": [
-            {
-                "n": "9915",
-                "status": "Internet Standard (STD 102)",
-                "date": "2026-01",
-                "why": "current DHCPv6: message formats, DUID, IA, relay, options",
-            },
-            {
-                "n": "2131",
-                "status": "Draft Standard",
-                "date": "1997-03",
-                "why": "DHCPv4 client and server state machines",
-            },
-            {
-                "n": "2132",
-                "status": "Draft Standard",
-                "date": "1997-03",
-                "why": "the DHCP option and BOOTP vendor extension registry",
-            },
-            {
-                "n": "3046",
-                "status": "Proposed Standard",
-                "date": "2001-01",
-                "why": "relay agent information, option 82",
-            },
-            {
-                "n": "6422",
-                "status": "Proposed Standard",
-                "date": "2011-12",
-                "why": "relay-supplied options for DHCPv6",
-            },
-            {
-                "n": "5007",
-                "status": "Proposed Standard",
-                "date": "2007-09",
-                "why": "DHCPv6 leasequery",
-            },
-            {
-                "n": "7653",
-                "status": "Proposed Standard",
-                "date": "2015-10",
-                "why": "DHCPv6 active leasequery",
-            },
-            {
-                "n": "8156",
-                "status": "Proposed Standard",
-                "date": "2017-06",
-                "why": "DHCPv6 failover between cooperating servers",
-            },
-        ],
-        "errata": [
-            "RFC 2131 carries 7 verified errata and is updated by RFC 3396, RFC 4361, RFC 5494 and RFC 6842. The errata change packet handling, so the codec is written against them, not the 1997 text alone.",
-            "RFC 2132 carries 2 verified errata and 5 updates.",
-            "RFC 9915 carries 1 verified erratum and removes IA_TA plus server unicast: implementing RFC 8415 today builds the obsolete behaviour in.",
-        ],
-        "prior": [
-            {
-                "name": "pydhcp",
-                "version": "0.9.1",
-                "date": "2026-10-21",
-                "note": "active and IPv4-centred; no relay, leasequery or failover",
-            },
-            {
-                "name": "dhcpy",
-                "version": "0.0.7",
-                "date": "2024-10-09",
-                "note": "an ISC Kea control API client, not the DHCP protocol",
-            },
-            {
-                "name": "dhcpkit",
-                "version": "1.0.7",
-                "date": "2017-06-25",
-                "note": "IPv6 only, unmaintained for nine years",
-            },
-            {
-                "name": "scapy",
-                "version": "2.8.0",
-                "date": "2026-10-02",
-                "note": "packet forgery; no allocation state machine or lease store",
-            },
-        ],
-        "gaps": [
-            "DHCPv6 written to RFC 9915 from the first commit, with IA_TA and server unicast absent by construction",
-            "a sans-IO state machine per RFC 2131 and RFC 9915 sec. 14 through sec. 18, testable on a virtual clock",
-            "relay agent with option 82 and RFC 6422 relay-supplied options, which is where real deployments break",
-            "leasequery and active leasequery so a monitoring system can read a live server",
-            "failover peer state machine, which no Python library attempts at all",
-        ],
-        "nongoals": [
-            "a packet crafting tool: use scapy for that and this library will not pretend otherwise",
-            "a complete production server: leases persist behind an interface, storage is the operator's choice",
-            "PXE, PXP or DOCSIS suboptions in the first release, only the registry hooks for them",
-        ],
-        "mods": [
-            (
-                "wire",
-                "DHCPv4 and DHCPv6 message formats (RFC 2131, RFC 9915 sec. 8, sec. 9)",
-            ),
-            (
-                "options",
-                "option registry, encoders and decoders (RFC 2132, RFC 9915 sec. 21)",
-            ),
-            ("duid", "DUID types and stability rules (RFC 9915 sec. 11)"),
-            (
-                "identity",
-                "identity associations: address and prefix binding (RFC 9915 sec. 12)",
-            ),
-            (
-                "fsm",
-                "client and server state machines with retransmission (RFC 9915 sec. 14, sec. 15, sec. 18)",
-            ),
-            ("validate", "message validation and error handling (RFC 9915 sec. 16)"),
-            (
-                "relay",
-                "relay forwarding and option 82 (RFC 9915 sec. 19, RFC 3046, RFC 6422)",
-            ),
-            ("leasequery", "query and active query (RFC 5007, RFC 7653)"),
-            ("failover", "peer protocol and states (RFC 8156)"),
-            ("clock", "sans-IO timers so every timeout is testable without sleeping"),
-        ],
-        "api": [
-            ("wire", "def", "decode_v6", "raw: bytes", "Message", "RFC 9915 sec. 8"),
-            ("wire", "def", "encode_v6", "msg: Message", "bytes", "RFC 9915 sec. 8"),
-            ("wire", "def", "decode_v4", "raw: bytes", "Bootp", "RFC 2131"),
-            (
-                "options",
-                "def",
-                "encode_option",
-                "code: int, value: object",
-                "bytes",
-                "RFC 2132, RFC 9915 sec. 21",
-            ),
-            (
-                "options",
-                "def",
-                "decode_options",
-                "raw: bytes",
-                "Options",
-                "RFC 9915 sec. 21",
-            ),
-            ("duid", "def", "parse_duid", "raw: bytes", "Duid", "RFC 9915 sec. 11"),
-            (
-                "fsm",
-                "def",
-                "client_step",
-                "state: ClientState, event: Event, now: float",
-                "Step",
-                "RFC 9915 sec. 18",
-            ),
-            (
-                "validate",
-                "def",
-                "check_message",
-                "msg: Message, context: ServerContext",
-                "list",
-                "RFC 9915 sec. 16",
-            ),
-            (
-                "relay",
-                "def",
-                "wrap_relay_forward",
-                "peer: Endpoint, link: Endpoint, msg: Message",
-                "bytes",
-                "RFC 9915 sec. 9",
-            ),
-            (
-                "leasequery",
-                "def",
-                "build_query",
-                "server: Endpoint, iaid: Optional[int]",
-                "Message",
-                "RFC 5007",
-            ),
-            (
-                "failover",
-                "def",
-                "peer_transition",
-                "state: FailoverState, event: PeerEvent",
-                "FailoverState",
-                "RFC 8156",
-            ),
-        ],
-        "steps": [
-            "M1 wire codec and option registry for both families, with RFC 2131 errata applied",
-            "M2 sans-IO client state machines on a virtual clock, including RFC 9915 retransmission",
-            "M3 server allocation for addresses and prefixes, DUID stability included",
-            "M4 relay with option 82 and RFC 6422, verified against a real relay",
-            "M5 leasequery and active leasequery",
-            "M6 failover peer protocol, then publication: 0.1.0",
-        ],
-        "extras": {},
-        "cli": "leasespy discover --6 --interface eth0 -- print the OFFER and every option decoded",
-    },
-    {
-        "name": "cwmp",
-        "pkg": "cwmp",
-        "title": "cwmp -- TR-069 CWMP for ACS and CPE",
-        "desc": "CWMP remote management: SOAP 1.2 RPC codec, session machinery, Digest "
-        "authentication, parameter path trees and file transfer, ACS and CPE sides",
-        "kw": [
-            "tr-069",
-            "cwmp",
-            "acs",
-            "cpe",
-            "provisioning",
-            "tr-181",
-            "soap",
-            "hntl",
-        ],
-        "why": (
-            "CWMP is how almost every customer premises device on earth is configured, and "
-            "Python cannot speak it. GenieACS, the serious open source ACS, is Node.js; on "
-            "PyPI the name tr069 is a registered but empty squat, acs belongs to Azure Container "
-            "Service, pyacs is an oceanographic sensor library, and inform is a logging "
-            "utility. Meanwhile the provisioning chain is already half built in Python: "
-            "DHCP hands the CPE its ACS URL, cwmp takes it from there. This is a deliberately "
-            "non-IETF project: the specification lives at the Broadband Forum, so every claim "
-            "below cites a document number that must be re-verified against the Forum's current "
-            "revision before it reaches code.",
-        ),
-        "docs": [
-            {
-                "label": "TR-069 (CWMP)",
-                "status": "Broadband Forum",
-                "date": "-",
-                "why": "the protocol: Inform, Get and SetParameterValues, TransferFile",
-            },
-            {
-                "label": "TR-181 (Device:2)",
-                "status": "Broadband Forum",
-                "date": "-",
-                "why": "the data model object and parameter tree",
-            },
-            {
-                "label": "TR-098 (InternetGatewayDevice)",
-                "status": "Broadband Forum",
-                "date": "-",
-                "why": "the model most deployed CPE still exposes",
-            },
-            {
-                "label": "TR-069 Annex 2 (SOAP)",
-                "status": "Broadband Forum",
-                "date": "-",
-                "why": "the envelope and encoding rules the RPC layer obeys",
-            },
-            {
-                "label": "TR-369 (USP)",
-                "status": "Broadband Forum",
-                "date": "-",
-                "why": "the WebSocket successor; a roadmap target, not a first release",
-            },
-            {
-                "n": "9110",
-                "status": "Internet Standard (STD 97)",
-                "date": "2022-06",
-                "why": "HTTP semantics under the transport, including authentication",
-            },
-        ],
-        "errata": [
-            "Outside the RFC series, so there is no errata mechanism to consult: pin the exact TR revision in every docstring and test, and record it in docs/research.md.",
-            "The ACS URL a CPE learns usually arrives from DHCP option 43 or a DHCPv6 vendor option, so leasespy is the natural partner and the two must agree on the encoding.",
-        ],
-        "prior": [
-            {
-                "name": "tr069",
-                "version": "-",
-                "date": "-",
-                "note": "registered but empty on PyPI: a squat that blocks the obvious name",
-            },
-            {
-                "name": "GenieACS",
-                "version": "-",
-                "date": "-",
-                "note": "the reference open source ACS, written in Node.js",
-            },
-            {
-                "name": "acs, pyacs, inform",
-                "version": "-",
-                "date": "-",
-                "note": "Azure tooling, an ocean sensor library and a logging utility",
-            },
-        ],
-        "gaps": [
-            "SOAP 1.2 RPC codec that refuses hostile XML: no DTDs, no external entities, bounded depth",
-            "CWMP session engine: Inform, RPC method dispatch, fault codes, keep-alive and nonce-based retry",
-            "HTTP Digest authentication on both sides, since most CPE ship nothing else",
-            "parameter path tree with wildcards, instance addition and deletion, typed constraints",
-            "both endpoints: an ACS side that can manage a real device and a CPE side to test against",
-        ],
-        "nongoals": [
-            "a web UI, ticket system or firmware repository: an ACS product composes those, this is the protocol",
-            "business provisioning logic beyond the data model",
-            "USP transport in the first release, only the seam that will allow it",
-        ],
-        "mods": [
-            ("envelope", "SOAP 1.2 envelope codec with XML hardening (TR-069 Annex 2)"),
-            ("methods", "one class per RPC method, request and response (TR-069)"),
-            (
-                "session",
-                "ACS session state, authentication and fault handling (TR-069)",
-            ),
-            (
-                "endpoint",
-                "CPE side: inform, connection request, method dispatch (TR-069)",
-            ),
-            (
-                "datamodel",
-                "object tree, parameter paths, types and constraints (TR-181, TR-098)",
-            ),
-            ("auth", "HTTP Digest challenge and response (RFC 9110, TR-069)"),
-            (
-                "transfer",
-                "TransferFile, Download and Upload with resumable semantics (TR-069)",
-            ),
-            ("clock", "periodic inform, session timeout and connection request retry"),
-        ],
-        "api": [
-            (
-                "envelope",
-                "def",
-                "encode_envelope",
-                "rpc: Rpc, session: SessionContext",
-                "bytes",
-                "TR-069 Annex 2",
-            ),
-            (
-                "envelope",
-                "def",
-                "decode_envelope",
-                "raw: bytes",
-                "Rpc",
-                "TR-069 Annex 2",
-            ),
-            (
-                "methods",
-                "def",
-                "build_inform",
-                "device: DeviceIdentity, events: list",
-                "Rpc",
-                "TR-069",
-            ),
-            ("methods", "def", "set_parameter_values", "params: dict", "Rpc", "TR-069"),
-            (
-                "session",
-                "async def",
-                "handle_session",
-                "request: HttpRequest, acs: AcsApp",
-                "HttpResponse",
-                "TR-069, RFC 9110",
-            ),
-            (
-                "endpoint",
-                "async def",
-                "run_inform",
-                "acs_url: str, identity: DeviceIdentity",
-                "Session",
-                "TR-069",
-            ),
-            (
-                "datamodel",
-                "def",
-                "resolve_path",
-                "tree: DataModel, path: str",
-                "list",
-                "TR-181",
-            ),
-            (
-                "datamodel",
-                "def",
-                "coerce_value",
-                "parameter: Parameter, value: object",
-                "object",
-                "TR-181",
-            ),
-            (
-                "auth",
-                "def",
-                "digest_challenge",
-                "nonce: bytes, realm: str",
-                "str",
-                "RFC 9110",
-            ),
-            (
-                "transfer",
-                "def",
-                "build_download",
-                "command_key: str, url: str, file_type: str",
-                "Rpc",
-                "TR-069",
-            ),
-        ],
-        "steps": [
-            "M1 hardened SOAP envelope codec, with an entity-expansion and depth bomb test",
-            "M2 RPC method classes and fault codes against a captured CPE session",
-            "M3 ACS session engine with Digest auth and keep-alive",
-            "M4 CPE endpoint able to complete a real Inform against the ACS in the same repo",
-            "M5 data model tree with wildcards, instance add and delete",
-            "M6 file transfer and connection request, then publication: 0.1.0",
-        ],
-        "extras": {},
-        "cli": "cwmp inform --acs http://acs.local:7547/ --id serial-1234",
-    },
-    {
-        "name": "devicespy",
-        "pkg": "devicespy",
-        "title": "devicespy -- be the UPnP device, not the control point",
-        "desc": "UPnP device side: SSDP advertisement, device and service descriptions, SOAP "
-        "control handling and GENA eventing, with hardened XML",
-        "kw": [
-            "upnp",
-            "ssdp",
-            "gena",
-            "scpd",
-            "device",
-            "media-server",
-            "printer",
-            "uda",
-        ],
-        "why": (
-            "Every Python UPnP library is a control point. async-upnp-client 0.49.0 "
-            "(2026-10-11), upnpclient 2.0.3 (2026-04-07) and python-upnp 1.0.0 (2024-07-12) "
-            "all talk to devices, and ssdp 1.3.1 (2025-09-06) plus ssdpy 0.4.1 do discovery. "
-            "Nothing lets a Python program be a device: advertise itself, publish its "
-            "description and SCPD, answer control requests and push events. That is the half a "
-            "printer, scanner or media server needs, and it is also the security-sensitive "
-            "half, because a device parses XML that a stranger on the LAN wrote.",
-        ),
-        "docs": [
-            {
-                "label": "UDA 2.0 (UPnP Device Architecture)",
-                "status": "UPnP Forum",
-                "date": "-",
-                "why": "device and service description, control, eventing, boot sequence",
-            },
-            {
-                "label": "GENA 1.0",
-                "status": "OASIS",
-                "date": "-",
-                "why": "subscribe, renew, notify, unsubscribe",
-            },
-            {
-                "label": "SDDL 1.0",
-                "status": "UPnP Forum",
-                "date": "-",
-                "why": "device and service description discovery layout",
-            },
-            {
-                "n": "9110",
-                "status": "Internet Standard (STD 97)",
-                "date": "2022-06",
-                "why": "the HTTP semantics every UPnP exchange rides on",
-            },
-        ],
-        "errata": [
-            "UDA and GENA are outside the RFC series: pin the exact specification revision in every docstring.",
-            "SSDP itself has a maintained Python owner already (ssdp 1.3.1), so the design decision is whether to depend on it or speak multicast HTTP directly. Record the reasoning in docs/strategy.md before writing code.",
-        ],
-        "prior": [
-            {
-                "name": "async-upnp-client",
-                "version": "0.49.0",
-                "date": "2026-10-11",
-                "note": "the reference control point; it is not a device stack",
-            },
-            {
-                "name": "upnpclient",
-                "version": "2.0.3",
-                "date": "2026-04-07",
-                "note": "client only, revived",
-            },
-            {
-                "name": "ssdp, ssdpy",
-                "version": "1.3.1, 0.4.1",
-                "date": "2025-09-06",
-                "note": "discovery transport, already solved",
-            },
-            {
-                "name": "upnp-device, upnp-server, deviceupnp",
-                "version": "-",
-                "date": "-",
-                "note": "all absent from PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "advertise and live lifecycle: alive, byebye, search response, and bootId changes on restart",
-            "description and SCPD authoring with validation, so a malformed service does not ship",
-            "SOAP control dispatch with argument typing and action-level authorisation",
-            "GENA subscription manager: renewals, evented properties, seqnum, and resubscribe on loss",
-            "defensive XML: no DTDs, no external entities, bounded size, since the peer is a stranger",
-        ],
-        "nongoals": [
-            "a control point: use async-upnp-client, which is better at it than this will be",
-            "DLNA or IGD semantics in the first release, only the generic device layer beneath them",
-            "port mapping through an Internet Gateway Device, which is a profile, not the protocol",
-        ],
-        "mods": [
-            (
-                "advertise",
-                "SSDP alive, byebye and search responses (UDA 2.0, SDDL 1.0)",
-            ),
-            ("description", "device and service description documents (UDA 2.0)"),
-            (
-                "scpd",
-                "service control protocol definition: actions, state variables, allowed values",
-            ),
-            ("control", "SOAP action dispatch with argument coercion (UDA 2.0)"),
-            (
-                "events",
-                "GENA subscriptions and evented property change notifications (GENA 1.0)",
-            ),
-            ("xmlsafe", "the hardened parser every other module must use"),
-            ("httpd", "the small asyncio HTTP surface the device serves (RFC 9110)"),
-        ],
-        "api": [
-            (
-                "advertise",
-                "async def",
-                "announce",
-                "device: Device, interfaces: list",
-                "None",
-                "UDA 2.0",
-            ),
-            (
-                "advertise",
-                "def",
-                "search_response",
-                "device: Device, stn: str",
-                "Response",
-                "UDA 2.0",
-            ),
-            (
-                "description",
-                "def",
-                "render_device_xml",
-                "device: Device",
-                "bytes",
-                "UDA 2.0",
-            ),
-            (
-                "scpd",
-                "def",
-                "parse_scpd",
-                "raw: bytes",
-                "ServiceDescription",
-                "UDA 2.0",
-            ),
-            (
-                "control",
-                "def",
-                "dispatch",
-                "service: Service, action: str, args: dict",
-                "ActionResult",
-                "UDA 2.0",
-            ),
-            (
-                "events",
-                "async def",
-                "notify",
-                "subscription: Subscription, props: dict",
-                "None",
-                "GENA 1.0",
-            ),
-            (
-                "events",
-                "def",
-                "renew",
-                "subscription: Subscription, requested: int",
-                "Subscription",
-                "GENA 1.0",
-            ),
-            ("xmlsafe", "def", "parse", "raw: bytes, limit: int", "Element", "design"),
-        ],
-        "steps": [
-            "M1 hardened XML parser plus description and SCPD round trip",
-            "M2 SSDP advertisement and search responses on Windows and Linux multicast",
-            "M3 control dispatch with typed arguments and error codes",
-            "M4 GENA subscriptions, renewals and evented properties",
-            "M5 a reference example device, then interop testing against a real control point",
-            "M6 publication: 0.1.0",
-        ],
-        "extras": {},
-        "cli": "devicespy serve --device ./device.xml --listen 0.0.0.0:49152",
-    },
-]
-# --------------------------------------------- clusters: privacy proxies, secure time, device auth
 
-PROJECTS_D: list[dict[str, Any]] = [
-    {
-        "name": "ohttp",
-        "pkg": "ohttp",
-        "title": "ohttp -- Oblivious HTTP client, gateway and responder",
-        "desc": "Oblivious HTTP message encapsulation and the three roles that use it: client, "
-        "gateway relay and responder, plus SVCB discovery of an oblivious gateway",
-        "kw": [
-            "ohttp",
-            "oblivious-http",
-            "privacy",
-            "hpke",
-            "relay",
-            "odoh",
-            "rfc9458",
-            "rfc9540",
-        ],
-        "why": (
-            "OHTTP exists so that the party who sees the content never sees who asked, and the "
-            "party who relays never sees the content. It is the reporting path for privacy-preserving "
-            "systems and it is standardised: RFC 9458 for the mechanism, RFC 9540 for "
-            "discovering a gateway through SVCB records, RFC 9230 for the DNS variant. Python "
-            "has nothing: ohttp, pyohttp and ohttp-relay are all absent from PyPI, and the one "
-            "implementation people reach for is a Rust binding built for Firefox. The crypto "
-            "primitives are not the blocker, since HPKE is already available; what nobody has "
-            "is the message format and the gateway that must not leak correlation data.",
-        ),
-        "docs": [
-            {
-                "n": "9458",
-                "status": "Proposed Standard",
-                "date": "2024-01",
-                "why": "Oblivious HTTP: encapsulated messages, keys, the gateway contract",
-            },
-            {
-                "n": "9540",
-                "status": "Proposed Standard",
-                "date": "2024-02",
-                "why": "discovering oblivious services through Service Binding records",
-            },
-            {
-                "n": "9230",
-                "status": "Experimental",
-                "date": "2022-06",
-                "why": "Oblivious DNS over HTTPS, the deployment this generalises",
-            },
-            {
-                "n": "9180",
-                "status": "IRTF Informational",
-                "date": "2022-02",
-                "why": "HPKE, the encryption envelope underneath",
-            },
-        ],
-        "errata": [
-            "RFC 9180 carries 6 verified errata: read them before writing or depending on an HPKE layer.",
-            "RFC 9540 defines the SVCB keys that identify an oblivious gateway, so discovery and the message layer cannot be built independently.",
-        ],
-        "prior": [
-            {
-                "name": "hpke",
-                "version": "0.3.2",
-                "date": "2024-10-26",
-                "note": "the HPKE primitives; not OHTTP and no gateway",
-            },
-            {
-                "name": "pyohttp",
-                "version": "-",
-                "date": "-",
-                "note": "Rust with Python bindings built for Firefox; absent from PyPI",
-            },
-            {
-                "name": "ohttp, ohttp-relay",
-                "version": "-",
-                "date": "-",
-                "note": "absent from PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "all three roles in one library: client, gateway and responder",
-            "key configuration and rotation with an explicit listener bound to config changes",
-            "gateway hardening: no redirects followed, bounded body sizes, no correlation identifiers logged",
-            "SVCB-based gateway discovery per RFC 9540 rather than a hand-configured URL",
-            "a runnable gateway binary, because a relay you cannot deploy is not a reference implementation",
-        ],
-        "nongoals": [
-            "a general HTTP client: bring httpx and hand it a transport",
-            "OHTTP-KEM and other draft-stage variants still moving under the IETF",
-            "an anonymity network: one honest component is enough by design, two colluding ones are not",
-        ],
-        "mods": [
-            ("message", "encapsulated request and response formats (RFC 9458)"),
-            (
-                "keys",
-                "key configurations, identifier, generation and rotation (RFC 9458)",
-            ),
-            ("client", "encapsulate, send, de-encapsulate (RFC 9458)"),
-            (
-                "gateway",
-                "the relay: forward without reading, and what that forbids (RFC 9458)",
-            ),
-            ("responder", "de-encapsulate, answer, re-encapsulate (RFC 9458)"),
-            (
-                "svcb",
-                "oblivious gateway discovery via HTTPS and SVCB records (RFC 9540)",
-            ),
-            (
-                "crypto",
-                "the HPKE seam, swappable and pinned to tested suites (RFC 9180)",
-            ),
-        ],
-        "api": [
-            (
-                "keys",
-                "def",
-                "generate_config",
-                "suite: Suite, key_id: int",
-                "KeyPair",
-                "RFC 9458",
-            ),
-            ("keys", "def", "parse_config", "raw: bytes", "KeyConfig", "RFC 9458"),
-            (
-                "message",
-                "def",
-                "encapsulate",
-                "request: bytes, config: KeyConfig, aad: bytes",
-                "Encapsulated",
-                "RFC 9458",
-            ),
-            (
-                "message",
-                "def",
-                "decapsulate",
-                "body: Encapsulated, keys: ResponderKeys",
-                "Decapsulated",
-                "RFC 9458",
-            ),
-            (
-                "gateway",
-                "async def",
-                "relay",
-                "body: Encapsulated, responder: str",
-                "Encapsulated",
-                "RFC 9458",
-            ),
-            (
-                "client",
-                "async def",
-                "request",
-                "gateway: Gateway, request: HttpRequest",
-                "HttpResponse",
-                "RFC 9458",
-            ),
-            (
-                "svcb",
-                "def",
-                "select_gateway",
-                "records: list, now: float",
-                "Gateway",
-                "RFC 9540",
-            ),
-            ("crypto", "def", "supported_suites", "", "tuple", "RFC 9180"),
-        ],
-        "steps": [
-            "M1 message and key configuration codecs, byte-exact",
-            "M2 responder and client against published vectors, using the hpke extra",
-            "M3 gateway with its hardening rules, and a correlation-leak test suite",
-            "M4 key rotation with listener notification",
-            "M5 SVCB discovery, then a runnable gateway binary",
-            "M6 publication: 0.1.0 with an end-to-end privacy trace in the docs",
-        ],
-        "extras": {"hpke": [("hpke", "0.3.2")], "dns": [("namespy", "0.9")]},
-        "cli": "ohttp gateway --listen 0.0.0.0:8083 --responder https://collector.example/ingest",
-    },
-    {
-        "name": "ntspy",
-        "pkg": "ntspy",
-        "title": "ntspy -- Network Time Security on asyncio",
-        "desc": "NTS: the key establishment protocol, cookie lifecycle and the NTPv4 extension "
-        "field that authenticates time, client and server sides",
-        "kw": ["ntp", "nts", "time", "authentication", "nts-ke", "rfc8915", "rfc5905"],
-        "why": (
-            "Authenticated time is a solved problem on paper and absent in Python. RFC 8915 "
-            "defines NTS: a TLS key establishment exchange that hands the client cookies, then "
-            "an authenticator in every NTP packet. Nothing on PyPI implements any of it, and "
-            "the NTP clients that do exist are either stale (ntplib 0.4.0, 2021-05-28) or plain "
-            "unauthenticated (pyntp 0.1.1, 2026-03-20). The gap is NTS, not NTP: nts, nts-ke, "
-            "ntp-nts and aiontp were all absent when checked on 2026-11-05.",
-        ),
-        "docs": [
-            {
-                "n": "8915",
-                "status": "Proposed Standard",
-                "date": "2020-09",
-                "why": "NTS: key establishment, cookies, the extension field",
-            },
-            {
-                "n": "5905",
-                "status": "Proposed Standard",
-                "date": "2010-06",
-                "why": "NTPv4 packet format and the modes NTS rides on",
-            },
-            {
-                "n": "9748",
-                "status": "Proposed Standard",
-                "date": "2025-02",
-                "why": "the refreshed NTP registries: modes, extension field types",
-            },
-            {
-                "n": "8633",
-                "status": "Best Current Practice",
-                "date": "2019-07",
-                "why": "operating rules an NTS client should respect",
-            },
-            {
-                "n": "9523",
-                "status": "Informational",
-                "date": "2024-02",
-                "why": "Khronos, the alternative approach; a roadmap comparison, not a dependency",
-            },
-        ],
-        "errata": [
-            "RFC 5905 carries 15 verified errata, the heaviest errata load in this portfolio, and is updated by RFC 7822, RFC 8573, RFC 9109, RFC 9748 and RFC 9769. The packet layer is written against the errata, not the 2010 text.",
-            "Re-check the errata pages for RFC 8915 and RFC 9748 before the M1 freeze rather than trusting what is written here.",
-        ],
-        "prior": [
-            {
-                "name": "ntplib",
-                "version": "0.4.0",
-                "date": "2021-05-28",
-                "note": "unauthenticated NTP client, unmaintained",
-            },
-            {
-                "name": "pyntp",
-                "version": "0.1.1",
-                "date": "2026-03-20",
-                "note": "active but unauthenticated; the opposite half of the problem",
-            },
-            {
-                "name": "nts, nts-ke, ntp-nts, aiontp",
-                "version": "-",
-                "date": "-",
-                "note": "absent from PyPI (2026-11-05); nts is an unrelated note-taking package",
-            },
-        ],
-        "gaps": [
-            "the NTS-KE exchange over TLS with application layer protocol negotiation and ALTS-style record framing",
-            "cookie issue, cache, renewal and the critical-path rule that a stale cookie must not break time",
-            "the NTP extension field authenticator and its truncated MAC discipline",
-            "a server side, because an authenticated client with nothing to talk to measures nothing",
-            "TLS exporter secrets through the cryptography extra rather than a bespoke TLS stack",
-        ],
-        "nongoals": [
-            "kernel clock discipline, slewing or PPS: measuring offset is in scope, steering the clock is not",
-            "a complete RFC 5905 server: broadcast, manycast and interleaved modes come later if ever",
-            "PTP and IEEE 1588, which is a different engineering world",
-        ],
-        "mods": [
-            (
-                "packet",
-                "NTPv4 header, extension fields and timestamp arithmetic (RFC 5905, RFC 9748)",
-            ),
-            ("ke", "key establishment records and notifications (RFC 8915)"),
-            ("cookies", "issue, validate, cache and renew (RFC 8915)"),
-            (
-                "extension",
-                "the NTS authenticator and unique identifier fields (RFC 8915)",
-            ),
-            ("auth", "derive, sign and verify with truncated MACs (RFC 8915)"),
-            ("client", "the asyncio client: establish, query, verify, re-establish"),
-            ("server", "the server half: accept, mint cookies, authenticate responses"),
-            (
-                "trust",
-                "local trust store and the leap second and stride flags it must not silently ignore",
-            ),
-        ],
-        "api": [
-            ("packet", "def", "decode_packet", "raw: bytes", "NtpPacket", "RFC 5905"),
-            (
-                "packet",
-                "def",
-                "encode_packet",
-                "packet: NtpPacket",
-                "bytes",
-                "RFC 5905",
-            ),
-            ("ke", "def", "encode_record", "record: KeRecord", "bytes", "RFC 8915"),
-            (
-                "ke",
-                "async def",
-                "establish",
-                "server: str, port: int",
-                "Negotiated",
-                "RFC 8915",
-            ),
-            (
-                "cookies",
-                "def",
-                "mint",
-                "state: ServerState, aead_key: bytes",
-                "bytes",
-                "RFC 8915",
-            ),
-            (
-                "cookies",
-                "def",
-                "validate",
-                "cookie: bytes, state: ServerState",
-                "Negotiated",
-                "RFC 8915",
-            ),
-            (
-                "extension",
-                "def",
-                "authenticate",
-                "packet: NtpPacket, context: Negotiated",
-                "NtpPacket",
-                "RFC 8915",
-            ),
-            (
-                "extension",
-                "def",
-                "verify",
-                "packet: NtpPacket, context: Negotiated",
-                "bool",
-                "RFC 8915",
-            ),
-            (
-                "client",
-                "async def",
-                "synchronize",
-                "servers: list, attempts: int",
-                "Sample",
-                "RFC 8915, RFC 8633",
-            ),
-            (
-                "server",
-                "async def",
-                "serve",
-                "config: ServerConfig",
-                "None",
-                "RFC 8915",
-            ),
-        ],
-        "steps": [
-            "M1 packet and timestamp layer with the RFC 5905 errata applied",
-            "M2 extension field authenticator, sign and verify",
-            "M3 NTS-KE client against a public NTS server",
-            "M4 cookie lifecycle including renewal under load",
-            "M5 server side plus a loopback interoperability test",
-            "M6 publication: 0.1.0",
-        ],
-        "extras": {"crypto": [("cryptography", "50.0.2")]},
-        "cli": "ntspy query time.google.com --nts -- show offset, delay and how it was authenticated",
-    },
-    {
-        "name": "tacacs",
-        "pkg": "tacacs",
-        "title": "tacacs -- TACACS+ authentication, authorization and accounting",
-        "desc": "TACACS+ client and server: header obfuscation, authentication, command "
-        "authorization, accounting, and the TLS transport that replaces them",
-        "kw": [
-            "tacacs",
-            "tacacs-plus",
-            "aaa",
-            "network",
-            "authentication",
-            "rfc8907",
-            "rfc9887",
-            "rfc9950",
-        ],
-        "why": (
-            "Every switch and router in a network operates area runs TACACS+ for device "
-            "administration, and Python has no client and no server. What is more, the "
-            "protocol is being actively standardised right now: RFC 9887 (2025-12) defines "
-            "TACACS+ over TLS 1.3, replacing the plaintext transport with an authenticated one, "
-            "and RFC 9950 (2026-03) adds a YANG data model. Both are younger than most feature "
-            "branches, and neither has an implementation anywhere outside vendor firmware. The "
-            "name is free: tacacs and rfc8907 are absent from PyPI as of 2026-11-05.",
-        ),
-        "docs": [
-            {
-                "n": "8907",
-                "status": "Informational",
-                "date": "2020-09",
-                "why": "the protocol as deployed: header, authentication, authorization, accounting",
-            },
-            {
-                "n": "9887",
-                "status": "Proposed Standard",
-                "date": "2025-12",
-                "why": "TACACS+ over TLS 1.3, the transport that fixes the plaintext problem",
-            },
-            {
-                "n": "9950",
-                "status": "Proposed Standard",
-                "date": "2026-03",
-                "why": "YANG data model for configuration and state",
-            },
-            {
-                "n": "1492",
-                "status": "Informational (Historic)",
-                "date": "1993-07",
-                "why": "the original TACACS, named only so nobody confuses the three",
-            },
-        ],
-        "errata": [
-            "RFC 8907 is Informational: it documents what vendors ship, and the deviations are real. Interoperability tests must be against hardware, not only against this specification.",
-            "RFC 9887 and RFC 9950 are recent enough that implementations, not errata, are the open question: re-check both before M1.",
-            "pytacs exists on PyPI (2025.11.27) but its scope was not established during this survey. Verify it before assuming the field is empty.",
-        ],
-        "prior": [
-            {
-                "name": "pyrad",
-                "version": "2.6.0",
-                "date": "2026-10-18",
-                "note": "RADIUS, a different protocol with a different job",
-            },
-            {
-                "name": "tacacs, rfc8907",
-                "version": "-",
-                "date": "-",
-                "note": "absent from PyPI (2026-11-05)",
-            },
-            {
-                "name": "vendor SDKs",
-                "version": "-",
-                "date": "-",
-                "note": "none: network gear is a client of the protocol, not a Python library",
-            },
-        ],
-        "gaps": [
-            "a real client for automation: login, authorize a command, and account for what ran",
-            "a server usable in tests, so a network team can assert on authorization decisions",
-            "the PAD obfuscation layer done correctly, since it is the part every home-grown parser gets wrong",
-            "the RFC 9887 TLS transport with the right identity and negotiation rules",
-            "a configuration shape that mirrors the RFC 9950 YANG model instead of inventing one",
-        ],
-        "nongoals": [
-            "RADIUS, which pyrad covers",
-            "an AAA policy engine: decisions are the operator's, this carries them",
-            "the historic RFC 1492 protocol",
-        ],
-        "mods": [
-            (
-                "header",
-                "TACACS+ header, flags, session and length discipline (RFC 8907)",
-            ),
-            (
-                "obfuscation",
-                "PAD based body obfuscation and the version quirks around it (RFC 8907)",
-            ),
-            ("body", "authentication, authorization and accounting bodies (RFC 8907)"),
-            ("client", "the asyncio client with reconnect and timeout policy"),
-            ("server", "the server with pluggable identity and policy backends"),
-            ("tls", "the TLS 1.3 transport (RFC 9887)"),
-            ("model", "configuration and state mirroring the data model (RFC 9950)"),
-        ],
-        "api": [
-            ("header", "def", "decode_header", "raw: bytes", "Header", "RFC 8907"),
-            ("header", "def", "encode_header", "header: Header", "bytes", "RFC 8907"),
-            (
-                "obfuscation",
-                "def",
-                "obfuscate",
-                "body: bytes, key: bytes, session_id: bytes",
-                "bytes",
-                "RFC 8907",
-            ),
-            (
-                "obfuscation",
-                "def",
-                "deobfuscate",
-                "body: bytes, key: bytes, session_id: bytes",
-                "bytes",
-                "RFC 8907",
-            ),
-            (
-                "body",
-                "def",
-                "authenticate_start",
-                "user: str, port: str, service: str",
-                "Packet",
-                "RFC 8907",
-            ),
-            (
-                "body",
-                "def",
-                "authorize_command",
-                "user: str, cmd: str, args: dict",
-                "Packet",
-                "RFC 8907",
-            ),
-            (
-                "body",
-                "def",
-                "account_command",
-                "user: str, cmd: str, task_id: int",
-                "Packet",
-                "RFC 8907",
-            ),
-            (
-                "client",
-                "async def",
-                "login",
-                "server: str, secret: bytes, user: str",
-                "AuthResult",
-                "RFC 8907",
-            ),
-            (
-                "server",
-                "async def",
-                "serve",
-                "host: str, port: int, policy: Policy",
-                "None",
-                "RFC 8907",
-            ),
-            (
-                "tls",
-                "async def",
-                "connect_tls",
-                "server: str, context: ssl.SSLContext",
-                "Connection",
-                "RFC 9887",
-            ),
-        ],
-        "steps": [
-            "M1 header, obfuscation and body codec with captured vendor traffic as vectors",
-            "M2 client: authentication, then authorization and accounting",
-            "M3 server with pluggable policy for tests",
-            "M4 RFC 9887 TLS transport",
-            "M5 RFC 9950 aligned configuration surface",
-            "M6 publication: 0.1.0 with hardware interop notes",
-        ],
-        "extras": {},
-        "cli": "tacacs authorize --server 10.0.0.1 --secret env:TACACS_KEY --user admin --cmd show run",
-    },
-]
-# ------------------------------------------- clusters: signed documents and telemetry
+def load_projects() -> list[dict[str, Any]]:
+    """Every project of every cluster, in PROJECT_ORDER, refusing a duplicate or an unlisted name."""
+    by_name: dict[str, dict[str, Any]] = {}
+    for module in (routing, naming, certificate):
+        for project in module.PROJECTS:
+            if project["name"] in by_name:
+                raise ValueError(project["name"] + ": defined in more than one forge_data module")
+            by_name[project["name"]] = project
+    if set(by_name) != set(PROJECT_ORDER):
+        raise ValueError(
+            "forge_data and PROJECT_ORDER disagree: "
+            + ", ".join(sorted(set(by_name) ^ set(PROJECT_ORDER)))
+        )
+    return [by_name[name] for name in PROJECT_ORDER]
 
-PROJECTS_E: list[dict[str, Any]] = [
-    {
-        "name": "signeddata",
-        "pkg": "signeddata",
-        "title": "signeddata -- CMS and S-MIME that can actually verify",
-        "desc": "Cryptographic Message Syntax: SignedData, EnvelopedData and AuthenticatedData, "
-        "countersignatures, ESS attributes, signed properties and RFC 3161 timestamps",
-        "kw": [
-            "cms",
-            "pkcs7",
-            "smime",
-            "signed-data",
-            "timestamp",
-            "rfc5652",
-            "rfc3161",
-            "ess",
-        ],
-        "why": (
-            "CMS, the format people still call PKCS number 7, is everywhere: S-MIME mail, "
-            "European e-invoicing, e-delivery envelopes, firmware manifests, contract "
-            "signatures. cryptography ships a narrow PKCS7 writer, and the rest of the Python "
-            "field is abandoned (smime 0.0.5, 2019-07-23), a name squat on an unrelated "
-            "argument parser (pkcs7 0.1.2, 2017-03-23) or a bare ASN.1 toolkit with no CMS "
-            "process rules (asn1crypto 1.5.1, 2022-03-15). Countersignatures, signed properties, "
-            "ESS signing-certificate-v2 and timestamp tokens cannot be verified in Python "
-            "today, which is why every project that needs them shells out to openssl smime.",
-        ),
-        "deps": [("asn1crypto", "1.5.1")],
-        "deps_note": (
-            "This project breaks the portfolio zero-dependency rule deliberately. DER is not "
-            "something to re-derive per project, and a half-written ASN.1 parser inside a "
-            "signature verifier is exactly the bug class this library exists to remove."
-        ),
-        "docs": [
-            {
-                "n": "5652",
-                "status": "Internet Standard",
-                "date": "2009-09",
-                "why": "CMS: the content types and every attribute that rides on them",
-            },
-            {
-                "n": "8551",
-                "status": "Proposed Standard",
-                "date": "2019-04",
-                "why": "S-MIME version 4: how CMS travels in mail",
-            },
-            {
-                "n": "2634",
-                "status": "Proposed Standard",
-                "date": "1999-06",
-                "why": "Enhanced Security Services attributes",
-            },
-            {
-                "n": "5035",
-                "status": "Proposed Standard",
-                "date": "2007-08",
-                "why": "CertID algorithm agility, replacing the SHA-1 binding",
-            },
-            {
-                "n": "3161",
-                "status": "Proposed Standard",
-                "date": "2001-08",
-                "why": "TSP: timestamp requests and the token that outlives the signature",
-            },
-            {
-                "n": "3370",
-                "status": "Proposed Standard",
-                "date": "2002-09",
-                "why": "CMS algorithm bindings: AES-CBC, HMAC, RSA-OAEP",
-            },
-            {
-                "n": "9044",
-                "status": "Proposed Standard",
-                "date": "2021-06",
-                "why": "AES-GMAC with CMS",
-            },
-            {
-                "n": "8702",
-                "status": "Proposed Standard",
-                "date": "2020-01",
-                "why": "SHAKE one-way functions in CMS",
-            },
-        ],
-        "errata": [
-            "RFC 3161 carries 3 verified errata and is updated by RFC 5816, which adds the SHA-2 identifiers everyone actually uses.",
-            "RFC 5035 carries 1 verified erratum and updates RFC 2634: a CertID built the 1999 way is SHA-1 bound.",
-            "Re-check the errata pages for RFC 5652 and RFC 8551 before the M1 freeze rather than trusting what is written here.",
-        ],
-        "prior": [
-            {
-                "name": "cryptography",
-                "version": "current",
-                "date": "-",
-                "note": "a PKCS7 writer with no countersignature, no ESS, no verify of arbitrary signers",
-            },
-            {
-                "name": "smime",
-                "version": "0.0.5",
-                "date": "2019-07-23",
-                "note": "abandoned before S-MIME v4",
-            },
-            {
-                "name": "asn1crypto",
-                "version": "1.5.1",
-                "date": "2022-03-15",
-                "note": "ASN.1 toolkit: definitions without process rules",
-            },
-            {
-                "name": "pkcs7, cms",
-                "version": "0.1.2, 0.0.2",
-                "date": "2017-03-23",
-                "note": "unrelated projects holding the obvious names",
-            },
-        ],
-        "gaps": [
-            "verify arbitrary SignedData with signed properties, message digest and ESS CertID checks",
-            "countersignatures, which is where long term validity actually comes from",
-            "timestamp token creation and validation as a first-class path (RFC 3161)",
-            "EnvelopedData decryption across key transport and password based recipient infos",
-            "an algorithm policy object so a verifier can refuse SHA-1 instead of accepting it silently",
-        ],
-        "nongoals": [
-            "an X.509 or PKI stack: certificate path building stays in cryptography",
-            "a mail client: this produces and consumes objects, RFC 8551 wrapping is the boundary",
-            "business rules for any particular e-invoicing or e-delivery profile",
-        ],
-        "mods": [
-            (
-                "cms",
-                "content info, signed data and the digested and encrypted variants (RFC 5652)",
-            ),
-            (
-                "signer",
-                "SignerInfo, signed and unsigned attributes, countersignature (RFC 5652)",
-            ),
-            (
-                "ess",
-                "signing-certificate and CertID with algorithm agility (RFC 2634, RFC 5035)",
-            ),
-            (
-                "verify",
-                "digest and signature checks plus algorithm policy enforcement (RFC 3370)",
-            ),
-            (
-                "envelope",
-                "EnvelopedData and AuthenticatedData recipient handling (RFC 5652, RFC 9044)",
-            ),
-            (
-                "tsp",
-                "time stamp request and response, token validation (RFC 3161, RFC 5816)",
-            ),
-            ("smime", "the mail facing wrapper and its protection rules (RFC 8551)"),
-            ("policy", "the explicit allow list every verifier consults"),
-        ],
-        "api": [
-            ("cms", "def", "load", "raw: bytes", "ContentInfo", "RFC 5652"),
-            ("cms", "def", "dump", "info: ContentInfo", "bytes", "RFC 5652"),
-            (
-                "signer",
-                "def",
-                "build_signer_info",
-                "key: SigningKey, certs: list, attrs: list",
-                "SignerInfo",
-                "RFC 5652",
-            ),
-            (
-                "ess",
-                "def",
-                "signing_certificate_v2",
-                "cert: Certificate",
-                "Attribute",
-                "RFC 5035",
-            ),
-            (
-                "verify",
-                "def",
-                "verify",
-                "info: ContentInfo, content: bytes, store: TrustStore",
-                "Verification",
-                "RFC 5652",
-            ),
-            (
-                "verify",
-                "def",
-                "countersign",
-                "info: ContentInfo, signer: int",
-                "ContentInfo",
-                "RFC 5652",
-            ),
-            (
-                "envelope",
-                "def",
-                "decrypt",
-                "info: ContentInfo, key: PrivateKey",
-                "bytes",
-                "RFC 5652",
-            ),
-            (
-                "tsp",
-                "def",
-                "build_request",
-                "message_imprint: bytes, nonce: int",
-                "bytes",
-                "RFC 3161",
-            ),
-            (
-                "tsp",
-                "def",
-                "verify_token",
-                "token: bytes, request: bytes, roots: list",
-                "DateTime",
-                "RFC 3161",
-            ),
-            ("policy", "def", "refuse_weak", "algorithms: list", "Policy", "design"),
-        ],
-        "steps": [
-            "M1 load and dump for SignedData with byte-exact round trip on captured samples",
-            "M2 verify: digest, signature, ESS CertID, message digest attribute",
-            "M3 signed properties, signing time and countersignature",
-            "M4 timestamp request, response and token chain validation",
-            "M5 EnvelopedData and AuthenticatedData, then the S-MIME wrapper",
-            "M6 publication: 0.1.0 with an interop matrix against openssl smime",
-        ],
-        "extras": {},
-        "cli": "signeddata verify doc.p7s --content doc.pdf --policy no-sha1",
-    },
-]
-PROJECTS_F: list[dict[str, Any]] = [
-    {
-        "name": "pgpenv",
-        "pkg": "pgpenv",
-        "title": "pgpenv -- OpenPGP messages and keys to RFC 9580",
-        "desc": "OpenPGP packet layer, v4 and v6 keys, encryption and signatures, AEAD "
-        "encrypted sessions and the armored stream that carries them",
-        "kw": ["openpgp", "pgp", "gpg", "encryption", "signatures", "rfc9580", "aead"],
-        "why": (
-            "RFC 9580 replaced RFC 4880 in July 2024 with version 6 keys, a revised algorithm "
-            "policy and new key material handling. Python's answer has not moved since before "
-            "that document existed: pgpy 0.6.0 was released 2022-11-24, and the openpgp name "
-            "belongs to a 2005 package. Everything current is C or Rust (Sequoia, RNP, GnuPG), "
-            "so a Python service either runs a subprocess with a keyring it does not want or "
-            "ignores OpenPGP. pgpenv is scoped to the message and key layer: correct packets, "
-            "honest verification, no daemon.",
-        ),
-        "deps": [("cryptography", "50.0.2")],
-        "deps_note": (
-            "OpenPGP without an AEAD, HKDF and EdDSA backend means writing those primitives, "
-            "which is a worse project than this one. One pinned dependency with no ceiling."
-        ),
-        "docs": [
-            {
-                "n": "9580",
-                "status": "Proposed Standard",
-                "date": "2024-07",
-                "why": "the current format: packets, v6 keys, algorithm policy, AEAD",
-            },
-            {
-                "n": "4880",
-                "status": "Obsolete",
-                "date": "2007-10",
-                "why": "the v4 wire a decade of material is still wearing; readable, never writable",
-            },
-            {
-                "n": "4880bis",
-                "status": "n/a",
-                "date": "-",
-                "why": "placeholder row: replace with the successor documents this project must consult",
-            },
-        ],
-        "errata": [
-            "RFC 9580 carries 7 verified errata. Read them before writing a single parser, because several concern key material encoding.",
-            "RFC 9580 obsoletes RFC 4880, RFC 5581 and RFC 6637: recipes copied from those documents may describe behaviour it removed.",
-        ],
-        "prior": [
-            {
-                "name": "pgpy",
-                "version": "0.6.0",
-                "date": "2022-11-24",
-                "note": "the incumbent, released before RFC 9580 existed",
-            },
-            {
-                "name": "openpgp",
-                "version": "0.2.3",
-                "date": "2005-07-01",
-                "note": "a squat on the obvious name",
-            },
-            {
-                "name": "Sequoia, RNP, GnuPG",
-                "version": "-",
-                "date": "-",
-                "note": "current and good, in C and Rust: subprocess or FFI from Python",
-            },
-        ],
-        "gaps": [
-            "version 6 keys and packets, plus a v4 reader for material that already exists",
-            "AEAD encrypted sessions with the granularity rules the specification sets",
-            "signature creation and verification that reports what it checked and what it refused",
-            "key certifications and binding checks handled so the web of trust is not silently trusted",
-            "armored streams with CRC-24 and line discipline that survive truncated input",
-        ],
-        "nongoals": [
-            "an agent, daemon or keyring service",
-            "a mail user agent or any MIME handling",
-            "compatibility with pre-standard PGP wire formats",
-            "a compliance claim: interoperability evidence ships with the release, not before it",
-        ],
-        "mods": [
-            ("packet", "packet framing, tags, old and new format headers (RFC 9580)"),
-            ("key", "public keys, v4 and v6 fingerprints, subkeys (RFC 9580)"),
-            (
-                "signature",
-                "signature packets and the hashing rules that bind them (RFC 9580)",
-            ),
-            (
-                "session",
-                "symmetric and public key session key handling, AEAD granularity (RFC 9580)",
-            ),
-            (
-                "message",
-                "literals, compression and the nesting that makes MIME work safe",
-            ),
-            ("armor", "radix64 with CRC-24 headers and trailers (RFC 9580)"),
-            (
-                "crypto",
-                "the seam onto cryptography, pinned to an allowed algorithm list",
-            ),
-            (
-                "limits",
-                "bounds on packet size, nesting depth and key count on every parse path",
-            ),
-        ],
-        "api": [
-            ("packet", "def", "iter_packets", "raw: IO", "Iterator", "RFC 9580"),
-            ("packet", "def", "encode_packet", "packet: Packet", "bytes", "RFC 9580"),
-            ("key", "def", "load_key", "raw: bytes", "Key", "RFC 9580"),
-            ("key", "def", "fingerprint", "key: Key", "bytes", "RFC 9580"),
-            (
-                "signature",
-                "def",
-                "sign",
-                "data: bytes, key: Key, policy: Policy",
-                "Signature",
-                "RFC 9580",
-            ),
-            (
-                "signature",
-                "def",
-                "verify",
-                "data: bytes, sig: Signature, key: Key",
-                "Verification",
-                "RFC 9580",
-            ),
-            (
-                "session",
-                "def",
-                "encrypt",
-                "data: IO, keys: list, aead: Aead",
-                "Message",
-                "RFC 9580",
-            ),
-            (
-                "session",
-                "def",
-                "decrypt",
-                "msg: Message, key: Key",
-                "bytes",
-                "RFC 9580",
-            ),
-            (
-                "armor",
-                "def",
-                "encode",
-                "packets: bytes, headers: dict",
-                "str",
-                "RFC 9580",
-            ),
-            ("armor", "def", "decode", "text: str", "bytes", "RFC 9580"),
-            ("limits", "def", "check", "plan: ParsePlan", "None", "design"),
-        ],
-        "steps": [
-            "M1 packet framing and armor with adversarial input tests",
-            "M2 v6 key parsing and fingerprints, v4 read path included",
-            "M3 signature create and verify against RFC 9580 test material",
-            "M4 classic and AEAD session encryption",
-            "M5 certifications and binding checks, then the policy object",
-            "M6 publication: 0.1.0 with an interop matrix against Sequoia and GnuPG",
-        ],
-        "extras": {},
-        "cli": "pgpenv sign file --key env:PGP_KEY --armor",
-    },
-    {
-        "name": "syslogkit",
-        "pkg": "syslogkit",
-        "title": "syslogkit -- RFC 5424 end to end, sender and receiver",
-        "desc": "The syslog protocol with structured data, the transport mappings that matter "
-        "(UDP, TCP framing, TLS, DTLS) and a receiver that does not lose a line",
-        "kw": [
-            "syslog",
-            "rfc5424",
-            "logging",
-            "operational",
-            "rfc6587",
-            "rfc5425",
-            "dtls",
-        ],
-        "why": (
-            "Python's stdlib ships a 1988-era SysLogHandler and nothing else. The maintained "
-            "library in the space, aiosyslog 0.2.1 (2026-08-25), is a client. What operators "
-            "actually lack is the receiving end: octet-counted and non-transparent framing, "
-            "resynchronisation after a truncated message, backpressure that does not drop "
-            "silently, and TLS with the cipher suite rules RFC 9662 set in October 2024. "
-            "syslogkit covers the protocol and its four transport mappings on both sides.",
-        ),
-        "docs": [
-            {
-                "n": "5424",
-                "status": "Proposed Standard",
-                "date": "2009-03",
-                "why": "the protocol: HEADER, structured data, the PRI and facility model",
-            },
-            {
-                "n": "5426",
-                "status": "Proposed Standard",
-                "date": "2009-03",
-                "why": "UDP transport, the one every implementation must have",
-            },
-            {
-                "n": "6587",
-                "status": "Historic",
-                "date": "2012-04",
-                "why": "TCP framing: octet counting and non-transparent, plus the resync problem",
-            },
-            {
-                "n": "5425",
-                "status": "Proposed Standard",
-                "date": "2009-03",
-                "why": "TLS transport including transport profiles and mutual auth",
-            },
-            {
-                "n": "9662",
-                "status": "Proposed Standard",
-                "date": "2024-10",
-                "why": "refreshed cipher suite requirements for secure syslog",
-            },
-            {
-                "n": "6012",
-                "status": "Proposed Standard",
-                "date": "2010-10",
-                "why": "DTLS transport for unreliable but secure delivery",
-            },
-        ],
-        "errata": [
-            "RFC 5424 has 5 errata on file with none verified; RFC 5425 has 2 on file, none verified. Re-check both pages before M1.",
-            "RFC 6587 is Historic, not Standards Track: it describes deployed practice, so framing tests must include the implementations it documents.",
-            "RFC 5424 obsoleted RFC 3164. A 3164 parser is a compatibility layer, and says so in its name.",
-        ],
-        "prior": [
-            {
-                "name": "stdlib logging.handlers",
-                "version": "-",
-                "date": "-",
-                "note": "a 3164-era UDP handler; no 5424 message, no receiver",
-            },
-            {
-                "name": "aiosyslog",
-                "version": "0.2.1",
-                "date": "2026-08-25",
-                "note": "async client only; no receiver, no framing, no TLS profile",
-            },
-            {
-                "name": "rsyslog, syslog-ng",
-                "version": "-",
-                "date": "-",
-                "note": "daemons, not importable libraries",
-            },
-        ],
-        "gaps": [
-            "an RFC 5424 parser and emitter that preserves structured data exactly, including escaped brackets",
-            "TCP framing on both sides with the RFC 6587 resynchronisation rules",
-            "a receiver with bounded queues, explicit drop accounting and no silent loss",
-            "TLS transport honouring RFC 9662 suites plus the RFC 5425 transport profiles",
-            "DTLS for the case where UDP semantics and integrity both matter",
-        ],
-        "nongoals": [
-            "storage, indexing or alerting: that is a logging platform, this is a protocol",
-            "parsing every vendor's 3164 dialect; the legacy parser is documented as tolerant",
-            "journald or Windows Event Log integration",
-        ],
-        "mods": [
-            (
-                "message",
-                "the 5424 message: PRI, TIMESTAMP, HOSTNAME, APP-NAME, PROCID, MSGID",
-            ),
-            ("pri", "facility and severity with the names operators expect (RFC 5424)"),
-            (
-                "sd",
-                "structured data elements, parameters and the registered SD-IDs (RFC 5424)",
-            ),
-            (
-                "framing",
-                "octet counting, non-transparent and the resync rules (RFC 6587)",
-            ),
-            ("udp", "the mandatory transport (RFC 5426)"),
-            ("tcp", "framed TCP with keepalive and connection hygiene (RFC 6587)"),
-            ("tls", "TLS transport, profiles and cipher suites (RFC 5425, RFC 9662)"),
-            ("dtls", "the datagram secure transport (RFC 6012)"),
-            ("receiver", "listener surface, drop counters, backpressure"),
-            (
-                "legacy",
-                "RFC 3164 tolerance, labelled as compatibility rather than correctness",
-            ),
-        ],
-        "api": [
-            ("message", "def", "parse", "raw: bytes", "Message", "RFC 5424"),
-            ("message", "def", "format", "msg: Message", "bytes", "RFC 5424"),
-            ("sd", "def", "encode_sd", "elements: list", "str", "RFC 5424"),
-            ("sd", "def", "decode_sd", "text: str", "list", "RFC 5424"),
-            (
-                "framing",
-                "def",
-                "frame_octet_counted",
-                "msg: bytes",
-                "bytes",
-                "RFC 6587",
-            ),
-            ("framing", "def", "unframe", "buffer: bytes", "tuple", "RFC 6587"),
-            (
-                "receiver",
-                "async def",
-                "listen_tls",
-                "host: str, port: int, context: ssl.SSLContext",
-                "Receiver",
-                "RFC 5425, RFC 9662",
-            ),
-            (
-                "receiver",
-                "async def",
-                "listen_udp",
-                "host: str, port: int",
-                "Receiver",
-                "RFC 5426",
-            ),
-            (
-                "tls",
-                "def",
-                "client_context",
-                "ca: bytes, profile: str",
-                "ssl.SSLContext",
-                "RFC 5425, RFC 9662",
-            ),
-            ("legacy", "def", "parse_3164", "raw: bytes", "Message", "RFC 3164"),
-        ],
-        "steps": [
-            "M1 message, PRI and structured data codec, exact round trip",
-            "M2 UDP and TCP senders plus receivers",
-            "M3 framing with resync tests and a fuzz corpus",
-            "M4 TLS transport honouring RFC 9662 and the RFC 5425 profiles",
-            "M5 drop accounting, backpressure, metrics export",
-            "M6 DTLS, then publication: 0.1.0",
-        ],
-        "extras": {},
-        "cli": "syslogkit listen --tls 0.0.0.0:6514 --cert ./server.pem --ca ./ca.pem",
-    },
-]
-PROJECTS_G: list[dict[str, Any]] = [
-    {
-        "name": "sfields",
-        "pkg": "sfields",
-        "title": "sfields -- structured field values, current specification",
-        "desc": "Structured Field Values for HTTP: parser and serializer for lists, dictionaries, "
-        "parameters and inner and outer coding, with an explicit type for every item",
-        "kw": [
-            "http",
-            "headers",
-            "structured-fields",
-            "rfc9651",
-            "parser",
-            "serialization",
-        ],
-        "why": (
-            "The HTTP Specification maintenance and transport area published RFC 9651 in "
-            "September 2024, which obsoletes RFC 8941 and adds the pieces everyone needed: "
-            "inner and outer coding, keyed structured fields and typed fields. The reference "
-            "Python implementation the working group maintained is gone from PyPI, checked on "
-            "2026-11-05, and the name structured-fields could not safely reuse it anyway "
-            "because a delisted name stays reserved. New HTTP fields are specified in this "
-            "notation constantly, so a Python project either hand-rolls a parser for each one "
-            "or vendors a stale copy of the deprecated code. This is the small library that "
-            "ends that.",
-        ),
-        "docs": [
-            {
-                "n": "9651",
-                "status": "Proposed Standard",
-                "date": "2024-09",
-                "why": "the current syntax and the coding and typing additions",
-            },
-            {
-                "n": "8941",
-                "status": "Obsolete",
-                "date": "2021-02",
-                "why": "what most existing notes and libraries still describe",
-            },
-            {
-                "n": "9110",
-                "status": "Internet Standard (STD 97)",
-                "date": "2022-06",
-                "why": "the field and trailer model this notation describes values for",
-            },
-        ],
-        "errata": [
-            "RFC 9651 carries 1 verified erratum. Read it before writing the tests, not after.",
-            "RFC 8941 is obsolete: cite it only when explaining what changed, never as the norm.",
-        ],
-        "prior": [
-            {
-                "name": "structured-field-values",
-                "version": "-",
-                "date": "-",
-                "note": "the working group implementation, deprecated and no longer installable",
-            },
-            {
-                "name": "structured-fields",
-                "version": "-",
-                "date": "-",
-                "note": "absent from PyPI (2026-11-05)",
-            },
-            {
-                "name": "structured",
-                "version": "0.1",
-                "date": "2016-01-14",
-                "note": "an unrelated query language for data structures",
-            },
-        ],
-        "gaps": [
-            "implement RFC 9651 rather than RFC 8941, including the additions the older text lacks",
-            "inner and outer coding, so a field value can carry a nested structured field",
-            "keyed dictionaries and typed values with round trip guarantees",
-            "strict error reporting that names the byte position, because header bugs are silent bugs",
-            "a conformance runner over the working group test suite, vendored as data with its provenance recorded",
-        ],
-        "nongoals": [
-            "HTTP semantics, header registries or a client: values only, in and out",
-            "a lenient parser for malformed headers: refuse loudly and let the caller decide",
-            "the full set of registered structured fields defined by other specifications",
-        ],
-        "mods": [
-            (
-                "parse",
-                "list and dictionary parsing with member and parameter structure (RFC 9651)",
-            ),
-            (
-                "item",
-                "the item types: integers, decimals, strings, tokens, byte sequences, booleans, dates",
-            ),
-            (
-                "serialize",
-                "canonical serialisation with byte-exact round trip (RFC 9651)",
-            ),
-            ("coding", "inner and outer coding of nested fields (RFC 9651)"),
-            ("typed", "typed structured fields and their dictionary form (RFC 9651)"),
-            (
-                "keys",
-                "keyed structured fields for dictionaries addressed by key (RFC 9651)",
-            ),
-            ("errors", "positional parse errors rather than a bare ValueError"),
-            ("conformance", "the runner that replays the vendored test vectors"),
-        ],
-        "api": [
-            ("parse", "def", "parse_list", "raw: str", "list", "RFC 9651"),
-            ("parse", "def", "parse_dictionary", "raw: str", "dict", "RFC 9651"),
-            ("item", "def", "parse_item", "raw: str", "Item", "RFC 9651"),
-            ("serialize", "def", "serialize_list", "members: list", "str", "RFC 9651"),
-            (
-                "serialize",
-                "def",
-                "serialize_dictionary",
-                "entries: dict",
-                "str",
-                "RFC 9651",
-            ),
-            ("coding", "def", "inner_parse", "encoded: str", "Item", "RFC 9651"),
-            ("coding", "def", "inner_serialize", "item: Item", "str", "RFC 9651"),
-            ("keys", "def", "parse_key", "raw: str", "str", "RFC 9651"),
-            ("errors", "def", "at", "offset: int, reason: str", "ParseError", "design"),
-            (
-                "conformance",
-                "def",
-                "run_suite",
-                "cases: Iterable",
-                "SuiteResult",
-                "design",
-            ),
-        ],
-        "steps": [
-            "M1 items, lists and dictionaries with canonical round trip",
-            "M2 byte sequences, dates and tokens with their edge cases",
-            "M3 inner and outer coding",
-            "M4 keyed and typed fields",
-            "M5 conformance runner over the vendored suite, reported in CI",
-            "M6 publication: 0.1.0 with the suite pass count on the landing page",
-        ],
-        "extras": {},
-        "cli": "python -m sfields parse 'a=1, b;tok=x' --json",
-    },
-    {
-        "name": "shaken",
-        "pkg": "shaken",
-        "title": "shaken -- PASSporT and SIP Identity for telephone traffic",
-        "desc": "Create and verify PASSporT claims and the SIP Identity header: attestation "
-        "levels, credential retrieval by x5u and x5c, and verification policy",
-        "kw": [
-            "stir",
-            "shaken",
-            "passport",
-            "sip",
-            "voice",
-            "telephony",
-            "rfc8225",
-            "rfc8588",
-        ],
-        "why": (
-            "Robocall mitigation runs on PASSporT: a signed assertion about the originating "
-            "number, carried in a SIP Identity header and verified against a certificate "
-            "published by the originating provider. RFC 8225 defines the token, RFC 8588 the "
-            "SHAKEN attestation levels, RFC 8224 the header. Python has none of it: stir is an "
-            "unrelated package from 2018, passport is a 2014 configuration tool, and shaken "
-            "and stirshaken are free names as of 2026-11-05. Any Python SIP service today ships "
-            "unsigned traffic, which increasingly means it is blocked.",
-        ),
-        "docs": [
-            {
-                "n": "8225",
-                "status": "Proposed Standard",
-                "date": "2018-02",
-                "why": "PASSporT: the compact token, its claims and canonicalisation",
-            },
-            {
-                "n": "8224",
-                "status": "Proposed Standard",
-                "date": "2018-02",
-                "why": "the SIP Identity header and verification behaviour",
-            },
-            {
-                "n": "8588",
-                "status": "Proposed Standard",
-                "date": "2019-05",
-                "why": "the SHAKEN extension: attestation levels and origin identifier",
-            },
-            {
-                "n": "9475",
-                "status": "Proposed Standard",
-                "date": "2023-12",
-                "why": "messaging use cases and extensions beyond voice",
-            },
-            {
-                "label": "ATIS-1000074 (SHAKEN)",
-                "status": "ATIS / SIP Forum",
-                "date": "-",
-                "why": "the deployment profile that fixes policy, caching and headers",
-            },
-        ],
-        "errata": [
-            "RFC 8224 carries 2 verified errata and is updated by RFC 8946; RFC 8588 carries 1 verified erratum.",
-            "RFC 8225 has 2 errata on file with none verified: re-check the page before M1.",
-            "Policy questions (what to do with a failed verification) belong to ATIS, not the RFCs. Say which document decided.",
-        ],
-        "prior": [
-            {
-                "name": "stir",
-                "version": "0.0.3",
-                "date": "2018-06-20",
-                "note": "an unrelated microservice merge tool",
-            },
-            {
-                "name": "passport",
-                "version": "0.1.1",
-                "date": "2014-07-22",
-                "note": "a Consul configuration manager",
-            },
-            {
-                "name": "shaken, stirshaken",
-                "version": "-",
-                "date": "-",
-                "note": "absent from PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "create and verify a PASSporT with the canonicalisation the specification demands",
-            "build and parse the Identity header including info, ppt and alg parameters",
-            "credential retrieval by x5u with a pinned CA store, and x5c inline validation",
-            "attestation level handling (A, B, C) as explicit policy rather than a boolean",
-            "replay and cache control: iat and txn discipline without inventing a cache",
-        ],
-        "nongoals": [
-            "a SIP stack or transport: this handles a header and a token",
-            "an STI-VI registry client or policy database service",
-            "number routing, carrier relationships or any business logic about who may sign",
-        ],
-        "mods": [
-            (
-                "passport",
-                "token construction, canonicalisation and signature (RFC 8225)",
-            ),
-            (
-                "claims",
-                "the registered claims and the SHAKEN extension set (RFC 8225, RFC 8588)",
-            ),
-            ("identity", "the SIP header field build and parse (RFC 8224)"),
-            ("credentials", "x5u retrieval with bounds, x5c validation, CA pinning"),
-            (
-                "attest",
-                "attestation levels and the policy a verifier applies (RFC 8588)",
-            ),
-            ("verify", "the outcome object: what passed, what was skipped and why"),
-            ("messaging", "the extensions for non-voice communications (RFC 9475)"),
-        ],
-        "api": [
-            (
-                "passport",
-                "def",
-                "create",
-                "claims: Claims, key: SigningKey, certs: list",
-                "str",
-                "RFC 8225",
-            ),
-            (
-                "passport",
-                "def",
-                "verify",
-                "token: str, store: TrustStore",
-                "Verification",
-                "RFC 8225",
-            ),
-            (
-                "claims",
-                "def",
-                "shaken_claims",
-                "orig: str, dest: str, level: str",
-                "Claims",
-                "RFC 8588",
-            ),
-            (
-                "identity",
-                "def",
-                "build_header",
-                "token: str, info: str",
-                "str",
-                "RFC 8224",
-            ),
-            (
-                "identity",
-                "def",
-                "parse_header",
-                "value: str",
-                "IdentityHeader",
-                "RFC 8224",
-            ),
-            (
-                "credentials",
-                "def",
-                "resolve",
-                "x5u: Optional[str], x5c: Optional[list], store: TrustStore",
-                "Certificate",
-                "RFC 8225",
-            ),
-            ("attest", "def", "policy_for", "level: str", "Policy", "RFC 8588"),
-            (
-                "verify",
-                "def",
-                "verify_request",
-                "headers: Headers, store: TrustStore",
-                "Verification",
-                "RFC 8224",
-            ),
-        ],
-        "steps": [
-            "M1 PASSporT create and verify with canonicalisation vectors",
-            "M2 Identity header build and parse",
-            "M3 credential resolution with x5u bounds and CA pinning",
-            "M4 attestation policy and the verification outcome object",
-            "M5 interop against a captured carrier trace",
-            "M6 publication: 0.1.0",
-        ],
-        "extras": {"crypto": [("cryptography", "50.0.2")]},
-        "cli": "shaken verify --request capture.txt --ca ./sti-ca.pem",
-    },
-    {
-        "name": "srtpkit",
-        "pkg": "srtpkit",
-        "title": "srtpkit -- SRTP and SRTCP in pure Python",
-        "desc": "SRTP protection and recovery, key derivation, replay databases, the AES-GCM "
-        "profile, SRTCP and DTLS-SRTP key export",
-        "kw": ["srtp", "rtp", "rtcp", "media", "aead", "rfc3711", "rfc7714", "rfc5764"],
-        "why": (
-            "RTP in Python has a good async owner in aiortp 0.8.0 (2026-10-18), but securing it "
-            "is a separate protocol that Python does not have. The WebRTC stacks bundle a "
-            "native SRTP, so a Python media service either depends on that or transmits in the "
-            "clear. RFC 3711 defines the transform, RFC 7714 the AEAD profile that should be "
-            "used for new deployments, and RFC 5764 the DTLS key establishment that a modern "
-            "signalling path expects. srtpkit is deliberately the transform and the key "
-            "handling, not a media stack.",
-        ),
-        "docs": [
-            {
-                "n": "3711",
-                "status": "Proposed Standard",
-                "date": "2004-03",
-                "why": "SRTP: transforms, the index and ROC, replay and key derivation",
-            },
-            {
-                "n": "7714",
-                "status": "Proposed Standard",
-                "date": "2015-12",
-                "why": "AES-GCM authenticated encryption in SRTP",
-            },
-            {
-                "n": "5764",
-                "status": "Proposed Standard",
-                "date": "2010-05",
-                "why": "DTLS handshake to establish SRTP and SRTCP keys",
-            },
-        ],
-        "errata": [
-            "RFC 5764 carries 3 verified errata and is updated by RFC 7983 and RFC 9443, the latter covering multiplexing when QUIC joins the picture.",
-            "RFC 7714 carries 2 verified errata.",
-            "RFC 3711 has 6 errata on file with none verified, and is updated by RFC 5506, RFC 6904 and RFC 9335. Read all three before implementing the transform.",
-        ],
-        "prior": [
-            {
-                "name": "aiortp",
-                "version": "0.8.0",
-                "date": "2026-10-18",
-                "note": "asyncio RTP and RTCP; the transport this sits under, not the security layer",
-            },
-            {
-                "name": "aiortc",
-                "version": "current",
-                "date": "-",
-                "note": "bundles a native SRTP implementation inside a WebRTC stack",
-            },
-            {
-                "name": "srtp, srtpkit",
-                "version": "-",
-                "date": "-",
-                "note": "absent from PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "protection and recovery with correct sequence number rollover handling, the bug that corrupts long calls",
-            "replay databases with the window and options the specification allows, including index based",
-            "the SRTP key derivation function and the session parameter set",
-            "the AES-GCM profile per RFC 7714, which is what a new deployment should negotiate",
-            "SRTCP with the E-bit and SRTCP index, plus key export from a DTLS handshake",
-        ],
-        "nongoals": [
-            "codecs, jitter buffers or any media handling",
-            "RTP transport, which aiortp already does properly",
-            "the legacy transforms nobody should negotiate, kept out of the default policy",
-        ],
-        "mods": [
-            (
-                "params",
-                "session parameters: cipher, auth, key and salt lengths (RFC 3711)",
-            ),
-            ("kdf", "the SRTP key derivation function (RFC 3711)"),
-            (
-                "transform",
-                "encryption and authentication, AES-GCM profile (RFC 3711, RFC 7714)",
-            ),
-            ("context", "stream and session context, rollover estimate and index"),
-            ("replay", "window and bit vector, index based variant (RFC 3711)"),
-            ("srtcp", "control packet protection and the E bit (RFC 3711)"),
-            ("mki", "master key identifier handling (RFC 3711)"),
-            ("dtls", "key export and the use_srtp negotiation (RFC 5764)"),
-            (
-                "policy",
-                "what may be negotiated, so weak profiles are refused by default",
-            ),
-        ],
-        "api": [
-            (
-                "params",
-                "def",
-                "select_profile",
-                "offered: list, policy: Policy",
-                "Profile",
-                "RFC 3711, RFC 7714",
-            ),
-            (
-                "kdf",
-                "def",
-                "derive",
-                "master: MasterSecret, label: int, index: int, length: int",
-                "bytes",
-                "RFC 3711",
-            ),
-            (
-                "context",
-                "def",
-                "for_stream",
-                "ssrc: int, keys: SessionKeys",
-                "StreamContext",
-                "RFC 3711",
-            ),
-            (
-                "transform",
-                "def",
-                "protect",
-                "packet: bytes, ctx: StreamContext, aad: bytes",
-                "bytes",
-                "RFC 7714",
-            ),
-            (
-                "transform",
-                "def",
-                "unprotect",
-                "packet: bytes, ctx: StreamContext",
-                "bytes",
-                "RFC 7714",
-            ),
-            (
-                "replay",
-                "def",
-                "check",
-                "ctx: StreamContext, index: int",
-                "bool",
-                "RFC 3711",
-            ),
-            (
-                "srtcp",
-                "def",
-                "protect_rtcp",
-                "packet: bytes, ctx: Context",
-                "bytes",
-                "RFC 3711",
-            ),
-            (
-                "mki",
-                "def",
-                "select_key",
-                "identifier: bytes, keys: MasterKeys",
-                "SessionKeys",
-                "RFC 3711",
-            ),
-            (
-                "dtls",
-                "def",
-                "export_keys",
-                "tls_export: bytes, policy: Policy",
-                "SessionKeys",
-                "RFC 5764",
-            ),
-        ],
-        "steps": [
-            "M1 parameters, KDF and context against the worked examples in the specification",
-            "M2 AES-GCM protect and unprotect, with vectors",
-            "M3 rollover estimate and replay window",
-            "M4 SRTCP and MKI",
-            "M5 DTLS key export and profile negotiation policy",
-            "M6 publication: 0.1.0 with a loopback call against a real RTP stack",
-        ],
-        "extras": {"crypto": [("cryptography", "50.0.2")], "rtp": [("aiortp", "0.8")]},
-        "cli": "python -m srtpkit bench --profile AES_128_GCM",
-    },
-]
+
+ALL_PROJECTS = load_projects()
+OPEN_QUESTIONS = {
+    **routing.OPEN_QUESTIONS,
+    **naming.OPEN_QUESTIONS,
+    **certificate.OPEN_QUESTIONS,
+}
+
+
 # ------------------------------------------------------------------------- rendering helpers
 
 GT = chr(62)  # the shell guard misreads a literal greater-than in source as redirection
@@ -3789,7 +446,8 @@ document, which is the honest grain size for a plan. See [docs/rfc-map.md](docs/
 ## Install
 
 ```bash
-git clone https://github.com/@ORG@/@NAME@.cd @NAME@
+git clone https://github.com/@ORG@/@NAME@.git
+cd @NAME@
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\\\\Scripts\\\\Activate.ps1
 pip install -e \".[dev]\"
@@ -3832,6 +490,10 @@ behaviour regressed. Reading the code and agreeing with it is not enough. That i
 Legend: `[ok]` implemented and pinned by a named test -- `[part]` partial, with what is
 missing stated -- `[ ]` not implemented -- `[no]` deliberate non-goal.
 
+A Where cell marked `(to be written)` names the test that will pin the row once it exists; no
+such test has been written yet, and the row cannot leave `[ ]` until it has. The Milestone
+column places the row on the ladder in section 2, and `-` means it is not placed yet.
+
 Update the affected row in the same commit that changes the behaviour. A row and its test
 drift apart within one release, and the document becomes useless exactly when it is needed.
 
@@ -3867,86 +529,45 @@ the code existing. Coverage in `pyproject.toml` ratchets in the same commit.
 - [ ] version 0.1.0 tagged, trusted publisher configured, README badges uncommented
 """
 
-OPEN_QUESTIONS = {
-    "rpkit": [
-        "rsync or RRDP first: rsync is universal, RRDP is the future and the easier test target",
-        "repository cache format, and whether it is shared with rtrkit on disk",
-    ],
-    "rtrkit": [
-        "does the server hold a full assertion set or stream from rpkit incrementally",
-    ],
-    "asnkit": [
-        "pure-Python radix versus an optional native one, decided by a benchmark on a full RIB",
-    ],
-    "h3tunnel": [
-        "which adapter lands first: qh3 or aioquic, given both expose datagrams today",
-        "does the proxy side need CONNECT-TCP before users ask for it",
-    ],
-    "dnssd-srp": [
-        "share the DNS codec with namespy through a dependency, or keep a thin local layer",
-        "how much of the registrar is a server rather than a validator",
-    ],
-    "turnkit": [
-        "does the ICE agent need to be wire compatible with aioice for a shared test harness",
-    ],
-    "leasespy": [
-        "which lease store interface keeps a production server possible without embedding one",
-        "how far to chase RFC 9915 conformance while peers still speak RFC 8415 behaviour",
-    ],
-    "cwmp": [
-        "which TR revision is the baseline, and how the chosen revision is pinned in tests",
-    ],
-    "devicespy": [
-        "depend on the maintained ssdp library or speak multicast HTTP directly",
-    ],
-    "ohttp": [
-        "is the HPKE layer a dependency on hpke or a pinned local implementation",
-    ],
-    "ntspy": [
-        "how much of RFC 5905 is in scope once the errata and RFC 9748 registry changes apply",
-    ],
-    "tacacs": [
-        "verify the scope of pytacs before assuming the field is empty",
-        "which vendor deviations become conformance fixtures",
-    ],
-    "signeddata": [
-        "how far the EnvelopedData recipient-info matrix extends in a first release",
-    ],
-    "pgpenv": [
-        "which algorithm policy is default, and whether v4 writing is ever offered",
-    ],
-    "syslogkit": [
-        "does the receiver own backpressure policy or expose a hook for the operator to",
-    ],
-    "sfields": [
-        "vendor the working group test suite as data, and record its provenance",
-    ],
-    "shaken": [
-        "how x5u retrieval is bounded so a verifier cannot be turned into a traffic amplifier",
-    ],
-    "srtpkit": [
-        "which profiles are negotiable by default once RFC 3711 and RFC 7714 are applied",
-    ],
-}
-
 
 def modules_table(p: dict[str, Any]) -> str:
     rows = [("`" + m + "`", d) for m, d in p["mods"]]
     return table(("Module", "Responsibility"), rows)
 
 
+UNPLACED = "-"  # the Milestone cell of a row nobody has placed on the ladder; never a guessed M-number
+TO_BE_WRITTEN = "(to be written)"
+
+
+def api_milestone(entry: tuple[str, ...]) -> str:
+    """The milestone an api entry is placed on: its optional seventh field, or UNPLACED."""
+    return entry[6] if len(entry) > 6 and entry[6] else UNPLACED
+
+
+def where_cell(fn: str) -> str:
+    """The test that will pin a row, named so pytest collects it, and marked as not yet written.
+
+    The cell used to read `tests/test_obligations.py::<fn>`: a file no project has, and a name without
+    the test_ prefix, so pytest would not have collected it even had the file existed. Every generated
+    row cited it as if it were evidence.
+    """
+    return "`tests/test_obligations.py::test_" + fn + "` " + TO_BE_WRITTEN
+
+
 def obligation_rows(p: dict[str, Any]) -> str:
     rows = []
-    for mod, _kind, fn, _params, _ret, cite in p["api"]:
+    for entry in p["api"]:
+        mod, _kind, fn, _params, _ret, cite = entry[:6]
         rows.append(
             (
                 "`" + mod + "." + fn + "()`",
                 cite,
                 "`[ ]`",
-                "`tests/test_obligations.py::" + fn + "`",
+                where_cell(fn),
+                api_milestone(entry),
             )
         )
-    return table(("Obligation", "Spec", "Status", "Where"), rows)
+    return table(("Obligation", "Spec", "Status", "Where", "Milestone"), rows)
 
 
 def nongoal_rows(p: dict[str, Any]) -> str:
@@ -4165,7 +786,10 @@ jobs:
       # declarations are floors. A file is written by a script rather than shell
       # redirection so the step behaves identically on a self-hosted runner.
       - run: python tools/write_freeze.py requirements-audit.txt
-      - run: python -m pip_audit --progress-spinner off -r requirements-audit.txt
+      # The audit reads the versions already installed above and installs nothing itself:
+      # --no-deps and --disable-pip stop pip-audit from resolving the list in a fresh
+      # environment, which is how it used to end up cloning a repository instead of auditing.
+      - run: python -m pip_audit --progress-spinner off --no-deps --disable-pip -r requirements-audit.txt
 """
 
 STRATEGY = """
@@ -4746,7 +1370,7 @@ def module_source(p: dict[str, Any], mod: str, doc: str) -> str:
     entries = [e for e in p["api"] if e[0] == mod]
     names = sorted({e[2] for e in entries})
     bodies, types = [], []
-    for _mod, kind, fn, params, ret, cite in entries:
+    for _mod, kind, fn, params, ret, cite in (e[:6] for e in entries):
         clean_params, param_types = sanitize_params(params)
         clean_ret = sanitize_annotation(ret)
         types += param_types + [clean_ret]
@@ -5008,59 +1632,6 @@ def normalize(p):
     return p
 
 
-def polish(root: pathlib.Path) -> list[str]:
-    """Normalise a written project in place, tolerating a tool that refuses to cooperate.
-
-    The formatter and the import/name fixes are mechanical, so the generator does not
-    reimplement them: it runs the same tools a contributor would. A failure here is
-    reported rather than raised, because the verification run is the authority.
-    """
-    notes = []
-    for cmd in (
-        ["-m", "ruff", "format", "."],
-        ["-m", "ruff", "check", "--fix", "--select", "I001,F401,RUF022", "."],
-    ):
-        try:
-            done = subprocess.run(
-                [sys.executable, *cmd],
-                cwd=str(root),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-        except OSError as error:  # the tool is missing; verification will say so loudly
-            notes.append(root.name + ": " + cmd[2] + " could not run: " + str(error))
-            continue
-        if done.returncode != 0:
-            tail = (done.stdout or done.stderr or "").strip().splitlines()[-1:]
-            notes.append(
-                root.name
-                + ": "
-                + " ".join(cmd[1:])
-                + " exited "
-                + str(done.returncode)
-                + (" :: " + tail[0] if tail else "")
-            )
-    return notes
-
-
-def build(p):
-    p = normalize(p)
-    root = ROOT / p["name"]
-    files = {
-        "pyproject.toml": render_pyproject(p),
-        "README.md": render_readme(p),
-        "ROADMAP.md": render_roadmap(p),
-    }
-    files.update(render_extras(p))
-    files.update(render_package(p))
-    files.update(render_tests(p))
-    for rel, text in files.items():
-        write(root / rel, text)
-    shutil.copyfile(LICENSE_SRC, root / "LICENSE")
-    p["polish"] = polish(root)
-    return len(files)
 HEADERS = ("Project", "Protocol", "Primary documents", "Nearest live project")
 
 
@@ -5076,1750 +1647,14 @@ def index_rows(projects):
     return table(HEADERS, rows)
 
 
-def write_index(projects):
+def render_index(projects):
+    """The workspace index, protocol-sdks.md, as the text the pipeline writes."""
     tpl = TPL_DIR / "index.md.tpl"
     text = tpl.read_text(encoding="utf-8")
     text = text.replace("TABLE", index_rows(projects))
-    text = text.replace("SURVEY_DATE", SURVEY_DATE)
-    write(ROOT / "protocol-sdks.md", text)
+    return text.replace("SURVEY_DATE", SURVEY_DATE)
 
 
-def run():
-    written = 0
-    notes = []
-    for project in ALL_PROJECTS:
-        written = written + build(project)
-        notes += project.get("polish", [])
-        print(project["name"], "ready", len(project["api"]), "obligations")
-    write_index(ALL_PROJECTS)
-    print("projects", len(ALL_PROJECTS), "files", written)
-    for note in notes:
-        print("polish:", note)
-    if not notes:
-        print("polish: every project came out clean")
-    return 0
-# ------------------------------------------------- cluster: public key infrastructure
-
-PROJECTS_H: list[dict[str, Any]] = [
-    {
-        "name": "pkix",
-        "pkg": "pkix",
-        "title": "pkix -- RFC 5280 path validation, the part Python never had",
-        "desc": "Certification path discovery and validation per RFC 5280: trust anchors, name "
-        "constraints, policy mapping and constraints, CRL and OCSP status hooks, "
-        "explicit result provenance",
-        "kw": [
-            "x509",
-            "pkix",
-            "path-validation",
-            "trust-anchor",
-            "name-constraints",
-            "rfc5280",
-        ],
-        "why": (
-            "Python can build a certificate and parse a certificate, and it cannot tell you "
-            "whether a certificate is valid. cryptography has no path validator; the one "
-            "serious implementation, certvalidator 0.11.1, has not been released since "
-            "2016-07-29 and sits on oscrypto, itself dead since 2022-03-18. Everything else "
-            "shells out to openssl verify and parses text. That is the odd gap in PKI: the "
-            "specification is a single algorithm, RFC 5280 section 6, and it is the one "
-            "nobody maintains in Python. Parsing is a solved problem and x509kit proved it "
-            "again in 2026-10-11 by writing a whole toolkit including its own RSA, ECDSA and "
-            "AES; pkix deliberately owns the opposite half: decisions, not bytes, and "
-            "primitives borrowed from cryptography rather than re-invented.",
-        ),
-        "deps": [("cryptography", "50.0.2")],
-        "deps_note": (
-            "Signature verification is the one thing this project must not write itself. A "
-            "path validator that re-implements RSA or ECDSA in Python turns a well studied "
-            "algorithm problem into a timing side channel project, so primitives come from "
-            "cryptography, which vendors audited OpenSSL."
-        ),
-        "docs": [
-            {
-                "n": "5280",
-                "status": "Proposed Standard",
-                "date": "2008-05",
-                "why": "the profile and the section 6 path validation algorithm",
-            },
-            {
-                "n": "5912",
-                "status": "Informational",
-                "date": "2010-06",
-                "why": "the ASN.1 modules every PKIX structure is written in",
-            },
-            {
-                "n": "6960",
-                "status": "Proposed Standard",
-                "date": "2013-06",
-                "why": "OCSP status, one of the two revocation inputs the algorithm consults",
-            },
-        ],
-        "errata": [
-            "RFC 5280 carries 6 verified errata and is updated by RFC 6818, RFC 8398, RFC 8399, RFC 9549, RFC 9598, RFC 9608, RFC 9618, RFC 9925 and RFC 10007. The updates are not editorial: internationalised names and notBefore bounds changed the answer.",
-            "RFC 5912 carries 8 verified errata.",
-            "RFC 6960 carries 6 verified errata.",
-        ],
-        "prior": [
-            {
-                "name": "certvalidator",
-                "version": "0.11.1",
-                "date": "2016-07-29",
-                "note": "the only Python path validator, dead for a decade on a dead crypto backend",
-            },
-            {
-                "name": "cryptography",
-                "version": "50.0.2",
-                "date": "2026-09-30",
-                "note": "builds and parses certificates, and verifies signatures, but builds no path and applies no policy",
-            },
-            {
-                "name": "x509kit",
-                "version": "0.10.0",
-                "date": "2026-10-11",
-                "note": "structures and its own crypto; validation policy is not the product",
-            },
-        ],
-        "gaps": [
-            "section 6.1 user data and 6.2 certification path validity checks, implemented as written",
-            "name constraints including the subtle excluded-subtrees rule and the check-only-at-issuance exception",
-            "policy mapping, policy constraints and explicit policy with anyPolicy handled correctly",
-            "revocation as an injected interface, so CRL, OCSP, stapled and cached answers are all opinions you can test",
-            "a result object that states which trust anchor, which chain, which policy and which revocation source decided it",
-        ],
-        "nongoals": [
-            "a certificate parser: accept DER or a cryptography object and refuse anything else",
-            "crypto primitives of any kind",
-            "ACME, CMP or any issuance protocol: enrollkit asks pkix whether the result is acceptable",
-            "the CA/Browser Forum baseline requirements, which are a policy profile built on top, not this algorithm",
-        ],
-        "mods": [
-            (
-                "anchors",
-                "trust anchor selection, including name restrictions and certificates only sets (RFC 5280 sec. 6.1)",
-            ),
-            (
-                "chain",
-                "candidate path discovery against a store or a directory of intermediates",
-            ),
-            (
-                "validity",
-                "the section 6.2 processing: signature, validity, issuer, name constraints (RFC 5280)",
-            ),
-            (
-                "names",
-                "name forms, general names and constraint comparison, including internationalised forms",
-            ),
-            (
-                "policy",
-                "policy mappings, constraints and anyPolicy resolution (RFC 5280)",
-            ),
-            (
-                "revocation",
-                "the status interface plus an allow list of trusted decisions",
-            ),
-            ("result", "the outcome object with provenance for every decision"),
-            ("store", "certificate, CRL and OCSP caches behind one interface"),
-        ],
-        "api": [
-            (
-                "anchors",
-                "def",
-                "load_anchor",
-                "cert_der: bytes, name_restriction: Optional[str]",
-                "TrustAnchor",
-                "RFC 5280 sec. 6.1",
-            ),
-            (
-                "chain",
-                "def",
-                "candidates",
-                "leaf: Certificate, intermediates: Store, anchors: list",
-                "list",
-                "RFC 5280 sec. 6.1",
-            ),
-            (
-                "validity",
-                "def",
-                "check_signature",
-                "cert: Certificate, issuer: Certificate",
-                "None",
-                "RFC 5280",
-            ),
-            (
-                "validity",
-                "def",
-                "check_validity",
-                "cert: Certificate, at: datetime",
-                "None",
-                "RFC 5280",
-            ),
-            (
-                "names",
-                "def",
-                "constraint_holds",
-                "name: GeneralName, constraints: Constraints, at_issuance: bool",
-                "bool",
-                "RFC 5280",
-            ),
-            (
-                "policy",
-                "def",
-                "resolve",
-                "chain: list, expected: Optional[set]",
-                "PolicyOutcome",
-                "RFC 5280",
-            ),
-            (
-                "revocation",
-                "def",
-                "status_of",
-                "cert: Certificate, issuer: Certificate, at: datetime",
-                "Status",
-                "RFC 5280",
-            ),
-            (
-                "result",
-                "def",
-                "validate",
-                "leaf: Certificate, anchors: list, at: datetime, policy: ValidationPolicy",
-                "Result",
-                "RFC 5280 sec. 6",
-            ),
-            ("store", "def", "remember", "cert: Certificate", "None", "design"),
-        ],
-        "steps": [
-            "M1 anchors and chain discovery with a fixture set of real chains",
-            "M2 section 6.2 validity: signature, dates, issuer matching, critical extensions",
-            "M3 name constraints including excluded subtrees and the issuance-time exception",
-            "M4 policy mapping, constraints and anyPolicy",
-            "M5 revocation interface plus CRL and OCSP backed implementations and cross-checks against openssl verify",
-            "M6 publication: 0.1.0 with the conformance trace against NIST and vendor path test suites",
-        ],
-        "extras": {},
-        "cli": "pkix verify leaf.pem --chain intermediate.pem --anchor root.pem --at 2026-11-05T00:00:00Z",
-    },
-    {
-        "name": "revokekit",
-        "pkg": "revokekit",
-        "title": "revokekit -- OCSP and CRL clients that know the current specification",
-        "desc": "Revocation in practice: OCSP request and response handling to RFC 9654 and RFC "
-        "9919, CRL and delta CRL processing, stapled response checks and caching",
-        "kw": [
-            "ocsp",
-            "crl",
-            "revocation",
-            "pkix",
-            "stapling",
-            "rfc6960",
-            "rfc9654",
-            "rfc9919",
-        ],
-        "why": (
-            "OCSP is being rewritten while we watch. RFC 9654 obsoleted RFC 8954 in 2024-08 "
-            "and redefined the Nonce extension, and RFC 9919 obsoleted RFC 5019 in July 2026 "
-            "with a lightweight high volume profile that recommends SHA-256. cryptography can "
-            "build and parse an OCSP request but ships no client, no caching, no responder "
-            "chain rules and no nonce policy, and the only library that ever did revocation "
-            "end to end died in 2016. Meanwhile the deployments that matter check stapled "
-            "responses whose must-staple extension comes from RFC 7633. revokekit is the client "
-            "and the policy, written against the documents as they now stand, and it is the "
-            "revocation provider pkix consumes.",
-        ),
-        "docs": [
-            {
-                "n": "6960",
-                "status": "Proposed Standard",
-                "date": "2013-06",
-                "why": "OCSP request, response and the basic confirmation types",
-            },
-            {
-                "n": "9654",
-                "status": "Proposed Standard",
-                "date": "2024-08",
-                "why": "the Nonce extension, obsoleting RFC 8954 and updating RFC 6960",
-            },
-            {
-                "n": "9919",
-                "status": "Proposed Standard",
-                "date": "2026-07",
-                "why": "the lightweight high volume profile, obsoleting RFC 5019",
-            },
-            {
-                "n": "7633",
-                "status": "Proposed Standard",
-                "date": "2015-10",
-                "why": "the TLS Feature extension behind OCSP must-staple",
-            },
-            {
-                "n": "5940",
-                "status": "Proposed Standard",
-                "date": "2010-08",
-                "why": "revocation choices carried inside CMS, the signed document case",
-            },
-        ],
-        "errata": [
-            "RFC 6960 carries 6 verified errata and is updated by RFC 8954 and RFC 9654: read 9654 before implementing Nonce, because it supersedes the older constraint.",
-            "RFC 9654 and RFC 9919 report no errata as of 2026-10-29, and both are new enough that implementations are the open question rather than corrections.",
-            "RFC 9919 obsoletes RFC 5019. Recipes copied from 5019 describe the superseded profile.",
-        ],
-        "prior": [
-            {
-                "name": "cryptography.x509.ocsp",
-                "version": "50.0.2",
-                "date": "2026-09-30",
-                "note": "request and response types, no client, no cache, no responder policy",
-            },
-            {
-                "name": "certvalidator",
-                "version": "0.11.1",
-                "date": "2016-07-29",
-                "note": "did OCSP and CRL checking; unmaintained for ten years",
-            },
-            {
-                "name": "x509kit",
-                "version": "0.10.0",
-                "date": "2026-10-11",
-                "note": "OCSP structures and signing, not a network client or a policy",
-            },
-        ],
-        "gaps": [
-            "an HTTP client with bounds: timeouts, response size caps, no redirect chasing, per-responder circuit breaking",
-            "nonce handling that actually follows RFC 9654, including what to do when the responder omits it",
-            "responder validation: delegated signing certificate, key purpose and OCSP no-check",
-            "thisUpdate, nextUpdate and maxAge discipline with clock skew tolerance stated explicitly",
-            "CRL and delta CRL fetching with issuer matching, and stapled response verification for TLS servers",
-        ],
-        "nongoals": [
-            "being an OCSP responder, which is a deployment product",
-            "path validation, which is pkix and consumes this library",
-            "CRL generation for CA operators",
-        ],
-        "mods": [
-            (
-                "request",
-                "build and sign requests, single and batch (RFC 6960, RFC 9919)",
-            ),
-            (
-                "response",
-                "parse and verify signatures, including delegated responders (RFC 6960)",
-            ),
-            (
-                "nonce",
-                "generation, echo verification and the missing nonce policy (RFC 9654)",
-            ),
-            (
-                "freshest",
-                "thisUpdate, nextUpdate, maxAge and skew tolerance (RFC 6960, RFC 9919)",
-            ),
-            ("http", "bounded transport with retries, budgets and circuit breaking"),
-            ("crl", "CRL and delta CRL fetch, matching and cache (RFC 5280)"),
-            (
-                "stapling",
-                "verify a TLS server's stapled response against the connection (RFC 7633)",
-            ),
-            ("cache", "storage with explicit staleness decisions"),
-        ],
-        "api": [
-            (
-                "request",
-                "def",
-                "build",
-                "cert: Certificate, issuer: Certificate, nonce: Optional[bytes]",
-                "bytes",
-                "RFC 6960, RFC 9919",
-            ),
-            (
-                "response",
-                "def",
-                "parse_and_verify",
-                "raw: bytes, responder_certs: list",
-                "Response",
-                "RFC 6960",
-            ),
-            ("nonce", "def", "generate", "length: int", "bytes", "RFC 9654"),
-            (
-                "nonce",
-                "def",
-                "check",
-                "request_nonce: Optional[bytes], response_nonce: Optional[bytes], policy: NoncePolicy",
-                "None",
-                "RFC 9654",
-            ),
-            (
-                "freshest",
-                "def",
-                "is_fresh",
-                "response: Response, at: datetime, tolerance: timedelta",
-                "bool",
-                "RFC 9919",
-            ),
-            (
-                "http",
-                "async def",
-                "query",
-                "url: str, body: bytes, budget: Budget",
-                "Response",
-                "RFC 6960",
-            ),
-            (
-                "crl",
-                "async def",
-                "fetch",
-                "distribution_point: DistributionPoint, reason: Optional[int]",
-                "Crl",
-                "RFC 5280",
-            ),
-            (
-                "stapling",
-                "def",
-                "verify_stapled",
-                "response: Response, peer_cert: Certificate, sans: list",
-                "Status",
-                "RFC 7633",
-            ),
-        ],
-        "steps": [
-            "M1 request and response codec against RFC 6960 vectors",
-            "M2 signature and delegated responder verification",
-            "M3 nonce rules per RFC 9654 with explicit missing-nonce policy",
-            "M4 freshness, caching and clock skew, then the bounded HTTP client",
-            "M5 CRL and delta CRL, and the stapling check",
-            "M6 publication: 0.1.0, wired as the revocation provider for pkix",
-        ],
-        "extras": {},
-        "cli": "revokekit query https://ocsp.example.org --cert leaf.pem --issuer ca.pem --nonce",
-    },
-    {
-        "name": "enrollkit",
-        "pkg": "enrollkit",
-        "title": "enrollkit -- CMP and EST clients for private PKIs",
-        "desc": "Certificate enrollment: CMP to RFC 9810 with CRMF requests, EST to RFC 7030, "
-        "PKCS#10 fallback, and the challenge and authentication mechanics around them",
-        "kw": [
-            "cmp",
-            "est",
-            "crmf",
-            "enrollment",
-            "pkcs10",
-            "rfc9810",
-            "rfc7030",
-            "pki",
-        ],
-        "why": (
-            "CMP was rewritten in 2025-07. RFC 9810 obsoletes RFC 4210 and RFC 9480, replaces "
-            "EncryptedValue with EnvelopedData and adds KEM key support, and it has already "
-            "accumulated 4 verified errata. No Python library implements CMP at any revision, "
-            "and EST, the simpler HTTPS enrollment profile, has none either. ACME is the well "
-            " served half, acme 5.9.0 shipped on 2026-10-29, and this project deliberately does "
-            "not compete with it: private and enterprise PKIs run CMP and EST, and today that "
-            "means openssl CLI invocations or a Java stack.",
-        ),
-        "deps": [("asn1crypto", "1.5.1"), ("cryptography", "50.0.2")],
-        "deps_note": (
-            "CMP messages are deep ASN.1 inside CMS. Writing that schema layer again would be "
-            "the third Python implementation of the same structures, so definitions come from "
-            "asn1crypto and primitives from cryptography. What this project owns is the "
-            "protocol: message order, protection, and recovery from the failures."
-        ),
-        "docs": [
-            {
-                "n": "9810",
-                "status": "Proposed Standard",
-                "date": "2025-07",
-                "why": "current CMP: messages, protection, EnvelopedData, KEM support",
-            },
-            {
-                "n": "9811",
-                "status": "Proposed Standard",
-                "date": "2025-07",
-                "why": "HTTP transfer for CMP, including the well-known URI prefix",
-            },
-            {
-                "n": "9481",
-                "status": "Proposed Standard",
-                "date": "2023-11",
-                "why": "the algorithm set CMP must and may support",
-            },
-            {
-                "n": "4211",
-                "status": "Proposed Standard",
-                "date": "2005-09",
-                "why": "CRMF: the certificate request message CMP carries",
-            },
-            {
-                "n": "7030",
-                "status": "Proposed Standard",
-                "date": "2013-10",
-                "why": "EST: enrollment over HTTPS with CMC, plus CA certificate retrieval",
-            },
-        ],
-        "errata": [
-            "RFC 9810 already carries 4 verified errata eleven months after publication. Implement 9810, not the 4210 text that most tutorials still copy.",
-            "RFC 7030 carries 3 verified errata and is updated by RFC 8951, RFC 8996 and RFC 9908.",
-            "RFC 4211 carries 2 verified errata and is updated by RFC 9045. RFC 9811 obsoletes RFC 6712 and, with RFC 9810, RFC 9480.",
-            "RFC 4210 is OBSOLETE: cite it only when explaining a legacy server.",
-        ],
-        "prior": [
-            {
-                "name": "acme",
-                "version": "5.9.0",
-                "date": "2026-10-29",
-                "note": "the ACME half, actively maintained; deliberately out of scope here",
-            },
-            {
-                "name": "certipy",
-                "version": "0.2.3",
-                "date": "2026-04-29",
-                "note": "Active Directory certificate services tooling, a different backend",
-            },
-            {
-                "name": "cmp, crmf, cmpclient, enrollkit",
-                "version": "-",
-                "date": "-",
-                "note": "cmp is a 2019 name squat, est belongs to a spectroscopy package, the rest are absent (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "CMP message construction and parsing to RFC 9810, including the EnvelopedData change",
-            "both protection mechanisms: shared secret MAC and signature based, with senderNonce replay discipline",
-            "the full interaction set: IP, CP, CR, Kurt, poll, conf, p10cr, rblu and error handling",
-            "EST client with /simpleEnroll, /cacerts and /curl plus HTTP Basic and TLS client authentication",
-            "poll and pending flows, which is where real CA integrations actually break",
-        ],
-        "nongoals": [
-            "ACME, which acme already does well",
-            "a CA or an RA: this is the client side of a conversation",
-            "key generation policy: bring your own keys, or accept a hardware-backed signer through an interface",
-        ],
-        "mods": [
-            ("messages", "CMP PKIMessage and its body variants (RFC 9810, RFC 9811)"),
-            (
-                "protection",
-                "POPOSIMESTAMP, POPOWITNESS and signature protection (RFC 9810)",
-            ),
-            ("crmf", "request objects, keys and proof of possession (RFC 4211)"),
-            ("flow", "the transaction state machine including poll and confirm"),
-            ("est", "the HTTPS profile: simpleEnroll, cacerts and curl (RFC 7030)"),
-            ("http", "bounded transport with retry and proxy awareness"),
-            (
-                "trust",
-                "server authentication for enrollment endpoints, the part everyone bolts on",
-            ),
-        ],
-        "api": [
-            (
-                "messages",
-                "def",
-                "build_cr",
-                "request: CrmfRequest, sender: str, recipient: Optional[str]",
-                "PkiMessage",
-                "RFC 9810",
-            ),
-            ("messages", "def", "parse", "raw: bytes", "PkiMessage", "RFC 9810"),
-            (
-                "protection",
-                "def",
-                "protect",
-                "msg: PkiMessage, secret: bytes",
-                "PkiMessage",
-                "RFC 9810",
-            ),
-            (
-                "protection",
-                "def",
-                "verify_protection",
-                "msg: PkiMessage, trust: Trust",
-                "None",
-                "RFC 9810",
-            ),
-            (
-                "crmf",
-                "def",
-                "build_request",
-                "public_key: object, subject: str, validity: Validity",
-                "CrmfRequest",
-                "RFC 4211",
-            ),
-            (
-                "flow",
-                "async def",
-                "enroll",
-                "endpoint: str, request: CrmfRequest, auth: Auth",
-                "EnrollmentResult",
-                "RFC 9810",
-            ),
-            (
-                "flow",
-                "async def",
-                "poll_until_ready",
-                "endpoint: str, transaction: bytes, budget: Budget",
-                "EnrollmentResult",
-                "RFC 9810",
-            ),
-            (
-                "est",
-                "async def",
-                "simple_enroll",
-                "endpoint: str, csr: bytes, auth: Auth",
-                "Certificate",
-                "RFC 7030",
-            ),
-            (
-                "est",
-                "async def",
-                "ca_certs",
-                "endpoint: str, auth: Auth",
-                "list",
-                "RFC 7030",
-            ),
-        ],
-        "steps": [
-            "M1 CMP message codec round trip against captured vendor traffic",
-            "M2 protection both ways, with senderNonce replay tests",
-            "M3 CRMF request building and proof of possession",
-            "M4 the transaction state machine including poll and error responses",
-            "M5 EST client and its two authentication modes",
-            "M6 publication: 0.1.0 with interop notes against at least two CA implementations",
-        ],
-        "extras": {},
-        "cli": "enrollkit est --url https://ca.example/simpleenroll --key device.key --csr device.csr",
-    },
-    {
-        "name": "ctspy",
-        "pkg": "ctspy",
-        "title": "ctspy -- certificate transparency verification in Python",
-        "desc": "Certificate Transparency to RFC 9162: signed certificate timestamps, Merkle "
-        "inclusion and consistency proofs, log storage tiles, and monitoring",
-        "kw": [
-            "certificate-transparency",
-            "ct",
-            "sct",
-            "merkle",
-            "logs",
-            "rfc9162",
-            "monitoring",
-        ],
-        "why": (
-            "CT is the audit trail for the whole Web PKI and Python cannot read it. Verifying "
-            "that a certificate really is in a log means parsing an SCT, checking a signed "
-            "tree head, and validating Merkle inclusion and consistency proofs over the tile "
-            "layout logs publish. RFC 9162 defines version 2.0 and it is worth saying plainly "
-            "that the RFC Editor records it as Experimental, obsoleting RFC 6962, which is why "
-            "deployment policy rather than the RFC is the real compatibility target. Nothing "
-            "on PyPI does any of this: ctlog is a combinatorial testing tool, ctkit is "
-            "medical image processing, sct is a radar calibration toolbox, and transparency is "
-            "a model explanation library.",
-        ),
-        "docs": [
-            {
-                "n": "9162",
-                "status": "Experimental",
-                "date": "2021-12",
-                "why": "CT 2.0: SCTs, signed tree heads, the two proof types and the TLS extension",
-            },
-            {
-                "n": "6962",
-                "status": "Obsolete",
-                "date": "2013-07",
-                "why": "version 1.0, still what many logs and captures emit",
-            },
-        ],
-        "errata": [
-            "RFC 9162 is Experimental with 1 erratum on file and none verified: expect variation between implementations and pin tests to real logs.",
-            "RFC 9162 obsoletes RFC 6962; log artifacts from 2013 deployments still follow 6962 shapes, so the reader must accept both.",
-        ],
-        "prior": [
-            {
-                "name": "ctlog",
-                "version": "0.7.1",
-                "date": "2026-06-14",
-                "note": "SAT based combinatorial testing, unrelated",
-            },
-            {
-                "name": "ctkit",
-                "version": "0.1.1",
-                "date": "2026-09-11",
-                "note": "CT image processing, unrelated",
-            },
-            {
-                "name": "Trillian, tombstone, ct-go",
-                "version": "-",
-                "date": "-",
-                "note": "the Go tooling that actually runs the logs; no Python equivalent",
-            },
-        ],
-        "gaps": [
-            "SCT parsing from the TLS extension, from X.509 and from OCSP, and signature verification against log keys",
-            "signed tree head verification and the static Merkle tree with hashed leaf prefixes",
-            "inclusion and consistency proof validation, including the empty tree and single leaf edges",
-            "log storage tile fetching with cache control and mirror fallback",
-            "a monitor that watches issued certificates and diffs them against what logs claim",
-        ],
-        "nongoals": [
-            "running a log: the audit trail needs independent operators, not another client library",
-            "browser policy decisions about which logs are accepted, which belong to the platform",
-            "certificate issuance, which is enrollkit and pkix",
-        ],
-        "mods": [
-            (
-                "sct",
-                "timestamp structure, versions and signature verification (RFC 9162)",
-            ),
-            (
-                "sth",
-                "signed tree heads, timestamps and the STH consistency rule (RFC 9162)",
-            ),
-            (
-                "merkle",
-                "static Merkle trees, leaf and node hash prefixes, proof validation (RFC 9162)",
-            ),
-            ("tiles", "log storage layout, fetching and caching (RFC 9162)"),
-            (
-                "client",
-                "add chain, add prechain, get sth and the submission endpoints (RFC 9162)",
-            ),
-            ("monitor", "stream reading, diffing and alerting on unexpected issuance"),
-            ("policy", "which logs and which artifacts a deployment will accept"),
-        ],
-        "api": [
-            ("sct", "def", "parse", "raw: bytes", "Sct", "RFC 9162"),
-            (
-                "sct",
-                "def",
-                "verify",
-                "sct: Sct, entry: MerkleTreeEntry, log_key: LogKey",
-                "None",
-                "RFC 9162",
-            ),
-            (
-                "sth",
-                "def",
-                "verify",
-                "sth: SignedTreeHead, log_key: LogKey",
-                "None",
-                "RFC 9162",
-            ),
-            (
-                "merkle",
-                "def",
-                "verify_inclusion",
-                "leaf: Hash, tree_size: int, proof: list, sth: SignedTreeHead",
-                "bool",
-                "RFC 9162",
-            ),
-            (
-                "merkle",
-                "def",
-                "verify_consistency",
-                "old: int, new: int, proof: list, old_root: Hash, new_root: Hash",
-                "bool",
-                "RFC 9162",
-            ),
-            (
-                "tiles",
-                "async def",
-                "fetch_tile",
-                "log: LogUrl, index: int, width: int",
-                "bytes",
-                "RFC 9162",
-            ),
-            (
-                "client",
-                "async def",
-                "add_chain",
-                "log: LogUrl, chain: list",
-                "Sct",
-                "RFC 9162",
-            ),
-            (
-                "monitor",
-                "async def",
-                "watch",
-                "log: LogUrl, since: int, sink: Sink",
-                "None",
-                "RFC 9162",
-            ),
-            (
-                "policy",
-                "def",
-                "acceptable",
-                "scts: list, at: datetime, policy: Policy",
-                "Decision",
-                "design",
-            ),
-        ],
-        "steps": [
-            "M1 static Merkle trees and both proof types against published vectors",
-            "M2 SCT and STH parsing plus signature verification",
-            "M3 tile fetching with caching and a mirror fallback",
-            "M4 the submission client for chains and pre-certificates",
-            "M5 a monitor with a durable cursor and diff output",
-            "M6 publication: 0.1.0 with cross checks against a production log",
-        ],
-        "extras": {"crypto": [("cryptography", "50.0.2")]},
-        "cli": "ctspy check cert.pem --logs logs.json --verify-inclusion",
-    },
-]
-# ------------------------------------------- cluster: BGP looking glass
-
-PROJECTS_I: list[dict[str, Any]] = [
-    {
-        "name": "pathattr",
-        "pkg": "pathattr",
-        "title": "pathattr -- the BGP wire codec a looking glass is built on",
-        "desc": "BGP-4 message and path attribute codec: OPEN, UPDATE, NOTIFICATION and "
-        "KEEPALIVE with every attribute, 4-octet AS, multiprotocol NLRI, ADD-PATH, "
-        "large and extended communities, and role capability",
-        "kw": [
-            "bgp",
-            "path-attributes",
-            "update",
-            "nlri",
-            "communities",
-            "rfc4271",
-            "looking-glass",
-        ],
-        "why": (
-            "Everything a looking glass shows is a BGP UPDATE, and Python has no decoder it "
-            "can own. ExaBGP is a daemon with a pipe protocol, not a library; pybgp3 has not "
-            "moved in years; and the parsers people copy from blog posts get 4-octet AS "
-            "numbers, ADD-PATH and the extended community sub-typing wrong. This is the shared "
-            "dependency for the whole cluster: BMP carries UPDATEs inside its path mapping "
-            "message, the RIB store indexes what it decodes, leak detection reasons over it, "
-            "and the router text parsers produce the same objects. It is a codec and a "
-            "stateless reader, deliberately not a router.",
-        ),
-        "docs": [
-            {
-                "n": "4271",
-                "status": "Draft Standard",
-                "date": "2006-01",
-                "why": "BGP-4: messages, the attribute flag octet, NLRI and the finite state machine vocabulary",
-            },
-            {
-                "n": "4360",
-                "status": "Proposed Standard",
-                "date": "2006-02",
-                "why": "extended communities and their sub-type namespaces",
-            },
-            {
-                "n": "8092",
-                "status": "Proposed Standard",
-                "date": "2017-02",
-                "why": "the large community attribute, four-octet safe by construction",
-            },
-            {
-                "n": "7911",
-                "status": "Proposed Standard",
-                "date": "2016-07",
-                "why": "ADD-PATH: a path identifier alongside the prefix",
-            },
-            {
-                "n": "9234",
-                "status": "Proposed Standard",
-                "date": "2022-05",
-                "why": "roles in OPEN and UPDATE for leak prevention and detection",
-            },
-        ],
-        "errata": [
-            "RFC 4271 carries 9 verified errata and is updated by RFC 4724, RFC 6286, RFC 6608, RFC 6793, RFC 7606, RFC 7607, RFC 7705, RFC 8212, RFC 8654, RFC 9072, RFC 9687 and RFC 9774. Several of those change the wire: 6793 is 4-octet AS, 7606 is error handling, 9072 is extended message lengths.",
-            "RFC 4360 carries 2 verified errata and is updated by RFC 7153 and RFC 7606.",
-            "RFC 7911 and RFC 9234 report no errata as of 2026-10-29.",
-        ],
-        "prior": [
-            {
-                "name": "exabgp",
-                "version": "5.0.15",
-                "date": "2026-10-17",
-                "note": "a BGP daemon with an external process API, not an importable codec",
-            },
-            {
-                "name": "pybgp3",
-                "version": "-",
-                "date": "-",
-                "note": "stale; absent from PyPI as a maintained project",
-            },
-            {
-                "name": "bgpkit, bgpspy, ribkit, pathattr",
-                "version": "-",
-                "date": "-",
-                "note": "all free on PyPI (2026-11-05); bgpkit and bgpspy collide with tool and service brands",
-            },
-        ],
-        "gaps": [
-            "a codec with no parser bugs: attribute flag semantics, optional and transitive handling, and length discipline on every path",
-            "4-octet AS in AS_PATH, AS4_PATH, and the two-byte fallback, plus confederation handling",
-            "multiprotocol NLRI with label and SID forms left opaque rather than guessed at",
-            "extended and large communities decoded against the IANA registries, with unknown sub-types preserved",
-            "hostile input refusal, since a looking glass parses what strangers announce",
-        ],
-        "nongoals": [
-            "a BGP speaker: no sessions, no timers, no announcement; ExaBGP, FRR and BIRD do that",
-            "best path selection or any policy engine",
-            "RIB storage and indexing, which is asnkit",
-        ],
-        "mods": [
-            (
-                "message",
-                "the four message types with header and length discipline (RFC 4271)",
-            ),
-            (
-                "attribute",
-                "attribute flags, type registry and per-attribute codecs (RFC 4271)",
-            ),
-            (
-                "aspath",
-                "AS_SEQUENCE, AS_SET and the 4-octet variants including confederations (RFC 6793)",
-            ),
-            (
-                "nlri",
-                "prefix, multiprotocol reachability and unreachability (RFC 4271, RFC 4760 lineage)",
-            ),
-            (
-                "communities",
-                "well-known, extended and large communities against the IANA registries (RFC 4360, RFC 8092)",
-            ),
-            (
-                "addpath",
-                "path identifier encoding in NLRI and in capabilities (RFC 7911)",
-            ),
-            ("roles", "the BGP_ROLE capability and path attribute (RFC 9234)"),
-            ("limits", "bounds on attribute count, AS path length and message size"),
-        ],
-        "api": [
-            ("message", "def", "decode", "raw: bytes", "Message", "RFC 4271"),
-            ("message", "def", "encode", "message: Message", "bytes", "RFC 4271"),
-            ("attribute", "def", "decode_attributes", "raw: bytes", "list", "RFC 4271"),
-            (
-                "aspath",
-                "def",
-                "parse_as_path",
-                "raw: bytes, four_octet: bool",
-                "AsPath",
-                "RFC 6793",
-            ),
-            (
-                "nlri",
-                "def",
-                "parse_nlri",
-                "raw: bytes, afi: int, safi: int, add_path: bool",
-                "list",
-                "RFC 7911",
-            ),
-            (
-                "communities",
-                "def",
-                "decode_communities",
-                "raw: bytes",
-                "list",
-                "RFC 8092",
-            ),
-            ("communities", "def", "decode_extended", "raw: bytes", "list", "RFC 4360"),
-            ("roles", "def", "peer_role", "capability: bytes", "Role", "RFC 9234"),
-            ("limits", "def", "check", "plan: ParsePlan", "None", "design"),
-        ],
-        "steps": [
-            "M1 message framing and NOTIFICATION and KEEPALIVE handling",
-            "M2 OPEN with the capability registry, including ADD-PATH and role",
-            "M3 path attributes with 4-octet AS and AS4 fallback",
-            "M4 multiprotocol NLRI, withdrawn and announce paths",
-            "M5 community decoding against the registries, unknown types preserved",
-            "M6 publication: 0.1.0 with captures from a live RIB as fixtures",
-        ],
-        "extras": {},
-        "cli": "pathattr decode update.bin --json --registry iana",
-    },
-    {
-        "name": "bmpkit",
-        "pkg": "bmpkit",
-        "title": "bmpkit -- stop screen scraping your routers",
-        "desc": "BGP Monitoring Protocol version 3 collector and decoder: initiation and peer "
-        "distinguishing, route monitoring with path attributes, Adj-RIB-Out and Loc-RIB "
-        "mirroring, statistics and route mirroring",
-        "kw": [
-            "bmp",
-            "bgp",
-            "monitoring",
-            "rib",
-            "looking-glass",
-            "rfc7854",
-            "rfc8671",
-            "rfc9069",
-        ],
-        "why": (
-            "BMP exists precisely because obtaining route views used to mean scraping a "
-            "terminal, and Python still cannot consume it. FRR, BIRD, Cisco and Juniper all "
-            "emit BMP; nothing in Python reads it. The name bmp on PyPI is a retrieval library "
-            "and pybmp is a BMP image handler, so the acronym is unclaimed in this sense. "
-            "bmpkit decodes to the same update objects pathattr defines and hands them to a "
-            "store, which is exactly the seam a looking glass, an analyst tool and a hijack "
-            "detector all need.",
-        ),
-        "docs": [
-            {
-                "n": "7854",
-                "status": "Proposed Standard",
-                "date": "2016-06",
-                "why": "BMP: common header, per peer header, route monitoring, statistics, termination and route mirroring",
-            },
-            {
-                "n": "8671",
-                "status": "Proposed Standard",
-                "date": "2019-11",
-                "why": "Adj-RIB-Out mirroring and the peer flag that distinguishes it",
-            },
-            {
-                "n": "9069",
-                "status": "Proposed Standard",
-                "date": "2022-02",
-                "why": "Loc-RIB access, the selected routes rather than the received ones",
-            },
-        ],
-        "errata": [
-            "RFC 7854 carries 3 verified errata and is updated by RFC 8671, RFC 9069, RFC 9515 and RFC 9736. Read all of them before M1: RFC 9515 and RFC 9736 were not examined during this survey and may change message handling.",
-            "RFC 8671 and RFC 9069 report no errata as of 2026-10-29.",
-        ],
-        "prior": [
-            {
-                "name": "bmp",
-                "version": "0.2.8",
-                "date": "2026-10-16",
-                "note": "block-max learned sparse retrieval, unrelated",
-            },
-            {
-                "name": "pybmp",
-                "version": "1.0.1",
-                "date": "2016-11-05",
-                "note": "a BMP image handler",
-            },
-            {
-                "name": "GoBGP and HurricanE Electric BMP tooling",
-                "version": "-",
-                "date": "-",
-                "note": "Go and C; no importable Python consumer",
-            },
-        ],
-        "gaps": [
-            "a collector that terminates many router sessions with per-peer state and no head-of-line blocking",
-            "route mirroring passthrough, which is how you debug a session without touching the router",
-            "correct handling of the three RIB views: Adj-RIB-In, Adj-RIB-Out and Loc-RIB",
-            "stats and termination records with reason codes, so gaps in the mirrored view are visible rather than silent",
-            "reconnect and sequence discipline, because TCP carries BMP and reordering is a real analyst hazard",
-        ],
-        "nongoals": [
-            "a time series store or a web UI; it emits objects to whatever you have",
-            "router configuration: BMP is a monitoring channel and this library never writes to one",
-            "BGP speaker behaviour, which is pathattr's boundary and below",
-        ],
-        "mods": [
-            (
-                "header",
-                "common and per peer headers with the version and flag discipline (RFC 7854)",
-            ),
-            (
-                "messages",
-                "route monitoring, statistics, peer down and up, initiation and termination, route mirroring (RFC 7854)",
-            ),
-            (
-                "rib",
-                "view selection across Adj-RIB-In, Adj-RIB-Out and Loc-RIB (RFC 8671, RFC 9069)",
-            ),
-            ("server", "the asyncio collector with per connection state"),
-            ("mirror", "passthrough of mirrored traffic for capture and replay"),
-            ("store", "the sink interface a mirrored RIB is written to"),
-            ("replay", "deterministic re-reading of a capture for tests and analysts"),
-        ],
-        "api": [
-            (
-                "header",
-                "def",
-                "decode_common",
-                "raw: bytes",
-                "CommonHeader",
-                "RFC 7854",
-            ),
-            (
-                "messages",
-                "def",
-                "decode_route_monitoring",
-                "raw: bytes, peer: PeerKey",
-                "Update",
-                "RFC 7854",
-            ),
-            ("messages", "def", "decode_statistics", "raw: bytes", "Stats", "RFC 7854"),
-            (
-                "rib",
-                "def",
-                "view_of",
-                "peer: PeerKey, flags: int",
-                "View",
-                "RFC 8671, RFC 9069",
-            ),
-            (
-                "server",
-                "async def",
-                "serve",
-                "host: str, port: int, sink: Sink",
-                "None",
-                "RFC 7854",
-            ),
-            (
-                "mirror",
-                "def",
-                "extract_bgp_message",
-                "message: RouteMirroring",
-                "bytes",
-                "RFC 7854",
-            ),
-            (
-                "replay",
-                "def",
-                "from_capture",
-                "path: pathlib.Path",
-                "Iterator",
-                "design",
-            ),
-        ],
-        "steps": [
-            "M1 header and message codec with vectors from a live FRR or BIRD speaker",
-            "M2 the collector server with per peer state and bounded buffers",
-            "M3 view selection for Adj-RIB-In, Adj-RIB-Out and Loc-RIB",
-            "M4 statistics, termination reasons and the mirroring passthrough",
-            "M5 capture and replay tooling wired into the test suite",
-            "M6 publication: 0.1.0 with a mirrored RIB comparison against a router CLI",
-        ],
-        "extras": {"codec": [("pathattr", "0.1")]},
-        "cli": "bmpkit listen --listen 0.0.0.0:11019 --mirror ./captures",
-    },
-    {
-        "name": "rpslkit",
-        "pkg": "rpslkit",
-        "title": "rpslkit -- RPSL parsing and IRR queries without a decade old dependency",
-        "desc": "Routing Policy Specification Language objects, IRR database clients, and "
-        "route-set and origin resolution that reports ambiguity instead of guessing",
-        "kw": [
-            "rpsl",
-            "irr",
-            "whois",
-            "route-object",
-            "origin",
-            "rfc2622",
-            "looking-glass",
-        ],
-        "why": (
-            "IRR is still the origin authority most operators filter on, and Python's only "
-            "serious tool, irrtree, last shipped 1.4.0 on 2021-06-24. Worse, the obvious "
-            "package names are gone: rpsl is a Raspberry Pi sensor library and irr is a numpy "
-            "joke. RFC 2622 defines the language, carries 3 verified errata and is updated by "
-            "RFC 4012 and RFC 7909, and the databases disagree with each other in ways a "
-            "library should surface rather than hide. rpslkit parses RPSL, queries the IRRs "
-            "concurrently, resolves route sets, and reports conflicts between IRR, RPKI and "
-            "observed routing as first class output.",
-        ),
-        "docs": [
-            {
-                "n": "2622",
-                "status": "Proposed Standard",
-                "date": "1999-06",
-                "why": "RPSL: object definitions, the set expression grammar and the delete syntax",
-            },
-            {
-                "n": "4012",
-                "status": "Proposed Standard",
-                "date": "2005-02",
-                "why": "digest objects for secure route origin registration",
-            },
-            {
-                "label": "IRRd database query interface",
-                "status": "operational practice",
-                "date": "-",
-                "why": "whois style queries, the newer HTTP and REST interfaces, and per database syntax quirks",
-            },
-        ],
-        "errata": [
-            "RFC 2622 carries 3 verified errata and is updated by RFC 4012 and RFC 7909; RFC 7909 adds the as-set import semantics that most parsers get wrong. Verify both before M2.",
-            "The four large IRRs differ in practice on comments, mangling and mirroring latency. Treat divergence as data and record which database answered.",
-        ],
-        "prior": [
-            {
-                "name": "irrtree",
-                "version": "1.4.0",
-                "date": "2021-06-24",
-                "note": "the working solution, four years without a release, no asyncio",
-            },
-            {
-                "name": "rpsl",
-                "version": "0.1.dev1",
-                "date": "2019-11-30",
-                "note": "a Raspberry Pi sensor library squatting the acronym",
-            },
-            {
-                "name": "irr",
-                "version": "0.2",
-                "date": "2021-09-28",
-                "note": "a numpy joke",
-            },
-        ],
-        "gaps": [
-            "a RPSL parser that keeps source, references and comments so provenance survives",
-            "concurrent queries to RIPE, RADB, NTTC, AltDB and the regional archives with per source policy",
-            "route set and as set expansion with cycle detection and explicit ambiguity reporting",
-            "conflict output comparing IRR assertions against RPKI assertions and observed routing",
-            "prefix match semantics that say which object matched and why",
-        ],
-        "nongoals": [
-            "generating router configuration from RPSL",
-            "being an IRR server or handling maintainer authentication and object updates",
-            "validating route authorisation policy, which is rpkit and pkix",
-        ],
-        "mods": [
-            (
-                "objects",
-                "RPSL object classes, attributes and the reserved word set (RFC 2622)",
-            ),
-            (
-                "parser",
-                "lenient line parsing that preserves source and comments (RFC 2622)",
-            ),
-            (
-                "sets",
-                "route set and as set expansion with cycles and imports (RFC 2622, RFC 7909)",
-            ),
-            ("client", "whois and HTTP queries with timeouts and per source budgets"),
-            ("resolve", "origin resolution for a prefix with ambiguity preserved"),
-            ("compare", "IRR against RPKI and against observed routing"),
-            ("sources", "registry of IRR databases, endpoints and quirks"),
-        ],
-        "api": [
-            ("parser", "def", "parse", "text: str, source: str", "list", "RFC 2622"),
-            (
-                "objects",
-                "def",
-                "matches_prefix",
-                "obj: RouteObject, prefix: str",
-                "bool",
-                "RFC 2622",
-            ),
-            (
-                "sets",
-                "def",
-                "expand",
-                "name: str, store: Store, depth: int",
-                "Expansion",
-                "RFC 7909",
-            ),
-            (
-                "client",
-                "async def",
-                "query",
-                "source: str, needle: str, budget: Budget",
-                "list",
-                "design",
-            ),
-            (
-                "resolve",
-                "async def",
-                "origins",
-                "prefix: str, sources: list",
-                "list",
-                "RFC 2622",
-            ),
-            (
-                "compare",
-                "def",
-                "conflicts",
-                "irr: list, roas: list, observed: list",
-                "list",
-                "design",
-            ),
-        ],
-        "steps": [
-            "M1 RPSL parser with round trip preserving comments and source",
-            "M2 whois and HTTP clients for the four major databases",
-            "M3 set expansion with cycle detection and ambiguity output",
-            "M4 prefix origin resolution with provenance per answer",
-            "M5 the IRR against RPKI against observed comparison",
-            "M6 publication: 0.1.0",
-        ],
-        "extras": {},
-        "cli": "rpslkit origins 1.2.3.0/24 --sources ripncc,radb,nttc --json",
-    },
-    {
-        "name": "bgpfeed",
-        "pkg": "bgpfeed",
-        "title": "bgpfeed -- RIPE RIS and RouteViews, without the C dependency",
-        "desc": "Live and archive upstream feeds: RIPE RIS websocket streaming and RouteViews "
-        "BGP2K MRT deltas, with checkpointing and a normalised event model shared with "
-        "bmpkit",
-        "kw": [
-            "ris",
-            "routeviews",
-            "mrt",
-            "bgp",
-            "streaming",
-            "monitoring",
-            "looking-glass",
-        ],
-        "why": (
-            "A looking glass that only shows your own routers is a status page. The upstream "
-            "view comes from RIPE RIS and RouteViews, and in Python that means the bgpstream C "
-            "library with its build headaches, or hand written FTP polling. Neither name is "
-            "taken on PyPI: bgpstream, ris and routeviews are all absent as of 2026-11-05. "
-            "bgpfeed is the small honest client for both, emitting the same objects bmpkit "
-            "emits, so anything built on one works with the other.",
-        ),
-        "docs": [
-            {
-                "n": "6396",
-                "status": "Proposed Standard",
-                "date": "2011-10",
-                "why": "MRT, the format RouteViews publishes its updates in",
-            },
-            {
-                "label": "RIPE RIS live API",
-                "status": "operational practice",
-                "date": "-",
-                "why": "the websocket protocol, viewer selection and message shape",
-            },
-            {
-                "label": "RouteViews archive layout",
-                "status": "operational practice",
-                "date": "-",
-                "why": "per collector hourly directories, file naming and retention",
-            },
-        ],
-        "errata": [
-            "RFC 6396 carries 2 verified errata.",
-            "RIS and RouteViews are operational services, not specifications: pin the endpoint and message version in tests and expect change without notice.",
-        ],
-        "prior": [
-            {
-                "name": "bgpstream",
-                "version": "-",
-                "date": "-",
-                "note": "the C library everyone wraps; absent from PyPI (2026-11-05)",
-            },
-            {
-                "name": "ris, routeviews, bgpfeed",
-                "version": "-",
-                "date": "-",
-                "note": "all free on PyPI (2026-11-05)",
-            },
-            {
-                "name": "exabgp rib scripts",
-                "version": "-",
-                "date": "-",
-                "note": "ad hoc pollers, not a resumable client",
-            },
-        ],
-        "gaps": [
-            "a RIS websocket client with viewer selection, reconnect and gap detection",
-            "a RouteViews delta poller that checkpoints by file and never re-reads or skips silently",
-            "one normalised event model across live feeds, archives and BMP sessions",
-            "backpressure and drop accounting, so a slow analyst does not silently lose updates",
-            "honest rate limiting that respects the operators running these services",
-        ],
-        "nongoals": [
-            "storage or query indexes, which is asnkit",
-            "analysis and alerting, which is routevalid",
-            "running a collector: these are clients of other people's infrastructure",
-        ],
-        "mods": [
-            ("model", "the common event and update objects shared with bmpkit"),
-            ("ris", "the websocket protocol, viewers and resubscription"),
-            ("routeviews", "archive discovery, delta polling and checkpoints"),
-            ("mrt", "UPDATE_FILE and TABLE_DUMP reading via asnkit"),
-            ("state", "resume points and gap accounting per source"),
-            ("budget", "politeness: concurrency caps, jitter and backoff"),
-        ],
-        "api": [
-            (
-                "ris",
-                "async def",
-                "subscribe",
-                "viewers: list, collectors: list, sink: Sink",
-                "Stream",
-                "design",
-            ),
-            (
-                "routeviews",
-                "async def",
-                "follow",
-                "collectors: list, since: datetime, sink: Sink",
-                "Stream",
-                "design",
-            ),
-            (
-                "mrt",
-                "def",
-                "iter_updates",
-                "path: pathlib.Path",
-                "Iterator",
-                "RFC 6396",
-            ),
-            (
-                "state",
-                "def",
-                "checkpoint",
-                "source: str, position: object",
-                "None",
-                "design",
-            ),
-            ("state", "def", "resume", "source: str", "object", "design"),
-            (
-                "budget",
-                "def",
-                "policy",
-                "max_concurrent: int, jitter: timedelta",
-                "Budget",
-                "design",
-            ),
-        ],
-        "steps": [
-            "M1 the shared event model, and MRT update reading through asnkit",
-            "M2 RIS websocket client with reconnect and gap reporting",
-            "M3 RouteViews delta poller with checkpoints",
-            "M4 politeness and drop accounting",
-            "M5 a replay fixture so downstream tests never touch the network",
-            "M6 publication: 0.1.0",
-        ],
-        "extras": {"mrt": [("asnkit", "0.1")]},
-        "cli": "bgpfeed ris --view rrc00 --collector rrc00-collector-1 --out events.ndjson",
-    },
-    {
-        "name": "routevalid",
-        "pkg": "routevalid",
-        "title": "routevalid -- hijack and leak detection with evidence attached",
-        "desc": "Correlates BMP sessions, RIS and RouteViews feeds, RPKI assertions, RTR "
-        "updates and IRR objects into typed events with a replayable evidence bundle",
-        "kw": [
-            "hijack",
-            "route-leak",
-            "rov",
-            "monitoring",
-            "rpki",
-            "bgp",
-            "rfc9234",
-            "detection",
-        ],
-        "why": (
-            "Detection tools either are research prototypes or are hosted dashboards you cannot "
-            "self host. What is missing is a library: given observations from your own BMP "
-            "sessions plus RIS and RouteViews, plus RPKI from rpkit and RTR state from rtrkit, "
-            "emit typed events with the evidence that justified each one. RFC 9234 gives the "
-            "role information that makes leaks checkable against declared relationships rather "
-            "than guessed, and that document has no errata and almost no implementations, which "
-            "is exactly the kind of gap this portfolio exists for.",
-        ),
-        "docs": [
-            {
-                "n": "9234",
-                "status": "Proposed Standard",
-                "date": "2022-05",
-                "why": "roles in OPEN and UPDATE: the basis for leak detection against declared relationships",
-            },
-            {
-                "n": "6480",
-                "status": "Informational",
-                "date": "2012-02",
-                "why": "the RPKI architecture whose assertions an origin check consumes",
-            },
-            {
-                "n": "9324",
-                "status": "Proposed Standard",
-                "date": "2022-12",
-                "why": "why fresh RPKI data must not trigger a route refresh when re-evaluating",
-            },
-            {
-                "n": "6396",
-                "status": "Proposed Standard",
-                "date": "2011-10",
-                "why": "the archive format for replaying history against a detection rule",
-            },
-        ],
-        "errata": [
-            "RFC 9234 reports no errata as of 2026-10-29, and deployment is thin enough that you should expect to test against peers who do not send the attribute.",
-            "RFC 6480 has 1 erratum on file, none verified; RFC 9324 updates RFC 8481 and should be read together with it.",
-        ],
-        "prior": [
-            {
-                "name": "STEAL-179 and similar research tools",
-                "version": "-",
-                "date": "-",
-                "note": "research artefacts, not maintained libraries",
-            },
-            {
-                "name": "hosted monitoring dashboards",
-                "version": "-",
-                "date": "-",
-                "note": "BGPStream based services: useful, but not something you can embed",
-            },
-            {
-                "name": "routevalid, leakkit, stealer, bgp-hijack",
-                "version": "-",
-                "date": "-",
-                "note": "all free on PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "prefix visibility tracking: who announces it, from which AS, seen by which collectors",
-            "origin checks combining RPKI state, RPSL assertions and observed AS paths with explicit disagreement handling",
-            "leak checks using declared roles where available and inferred relationships where not",
-            "confidence scoring from collector diversity, so one vantage point cannot raise a page",
-            "an evidence bundle per event, replayable from the raw observations",
-        ],
-        "nongoals": [
-            "a dashboard, an alerting pipeline or a ticket system",
-            "storage engine design: it consumes a sink",
-            "community based mitigation or any action against a router: detection only",
-        ],
-        "mods": [
-            ("observe", "the normalised observation model from bmpkit and bgpfeed"),
-            (
-                "visibility",
-                "prefix and AS visibility tracking over collectors and time",
-            ),
-            ("origin", "origin checks combining RPKI, RPSL and observed paths"),
-            ("leak", "role and relationship checks on AS paths (RFC 9234)"),
-            ("score", "confidence from collector diversity and disagreement"),
-            ("event", "typed events with severity, evidence and replay references"),
-            ("replay", "deterministic re-evaluation of history against a rule set"),
-            ("rules", "the policy object deciding what counts as an event"),
-        ],
-        "api": [
-            (
-                "observe",
-                "def",
-                "record",
-                "update: Update, source: Source, at: datetime",
-                "None",
-                "design",
-            ),
-            (
-                "visibility",
-                "def",
-                "announcers",
-                "prefix: str, window: timedelta",
-                "list",
-                "design",
-            ),
-            (
-                "origin",
-                "def",
-                "check_origin",
-                "prefix: str, asn: int, roas: list, irr: list",
-                "OriginVerdict",
-                "RFC 6480",
-            ),
-            (
-                "leak",
-                "def",
-                "check_path",
-                "asn_path: list, relationships: Relationships",
-                "LeakVerdict",
-                "RFC 9234",
-            ),
-            (
-                "score",
-                "def",
-                "confidence",
-                "observations: list, diversity: int",
-                "float",
-                "design",
-            ),
-            (
-                "event",
-                "def",
-                "emit",
-                "kind: str, evidence: Evidence, severity: str",
-                "Event",
-                "design",
-            ),
-            (
-                "replay",
-                "def",
-                "reevaluate",
-                "store: Store, rules: Rules, since: datetime",
-                "list",
-                "RFC 9324",
-            ),
-        ],
-        "steps": [
-            "M1 the observation model and visibility tracking",
-            "M2 origin checks against rpkit assertions and rpslkit output",
-            "M3 role based leak checks with an inferred relationship fallback",
-            "M4 confidence scoring and the event schema with evidence",
-            "M5 replay, then a historical corpus to measure false positives",
-            "M6 publication: 0.1.0 with a measured precision report",
-        ],
-        "extras": {
-            "feeds": [("bmpkit", "0.1"), ("bgpfeed", "0.1")],
-            "rpki": [("rpkit", "0.1"), ("rtrkit", "0.1")],
-        },
-        "cli": "routevalid watch --prefix 1.2.3.0/24 --sources bmp,ris --min-confidence 0.8",
-    },
-    {
-        "name": "lgc",
-        "pkg": "lgc",
-        "title": "lgc -- looking glass client that returns objects, not terminal text",
-        "desc": "Typed looking glass clients: the de-facto LGC and LGS wire protocol, HTTP and "
-        "SSH backends, and vendor output parsers that produce pathattr objects",
-        "kw": [
-            "looking-glass",
-            "lgc",
-            "lgs",
-            "bgp",
-            "operations",
-            "parsers",
-            "frr",
-            "bird",
-        ],
-        "why": (
-            "The last mile of every looking glass is text: someone parses show ip bgp output "
-            "with a regular expression written in a hurry. The de-facto LGC and LGS protocol has "
-            "no Python client, the old looking-glass package died in 2019, and pybird only "
-            "covers BIRD. lgc is a client library with one promise: every query returns typed "
-            "objects from pathattr and asnkit, and where a device can only give text a named "
-            "parser with tests owns the conversion. It is read only by construction, which is "
-            "the property that lets you point it at production.",
-        ),
-        "docs": [
-            {
-                "label": "LGC and LGS protocol",
-                "status": "de-facto practice",
-                "date": "-",
-                "why": "the request, response and progress framing used by open source looking glasses",
-            },
-            {
-                "label": "FRR and BIRD command interfaces",
-                "status": "implementation practice",
-                "date": "-",
-                "why": "vtysh, the FRR REST API and birdc JSON output",
-            },
-            {
-                "n": "4271",
-                "status": "Draft Standard",
-                "date": "2006-01",
-                "why": "the semantics every parser ultimately claims to render",
-            },
-        ],
-        "errata": [
-            "LGC, LGS, FRR and BIRD interfaces are not specifications with errata: pin versions in fixtures and treat output drift as a bug in the parser, not the device.",
-            "Vendor text formats change between releases without notice, which is why every parser needs a captured fixture per version.",
-        ],
-        "prior": [
-            {
-                "name": "looking-glass",
-                "version": "1.0.4",
-                "date": "2019-03-26",
-                "note": "a web visualisation tool, abandoned",
-            },
-            {
-                "name": "pybird",
-                "version": "1.2.0",
-                "date": "2023-02-08",
-                "note": "BIRD only, no typed BGP objects",
-            },
-            {
-                "name": "lgc, birdc, frr, gobgp, quagga",
-                "version": "-",
-                "date": "-",
-                "note": "all free on PyPI (2026-11-05)",
-            },
-        ],
-        "gaps": [
-            "an LGC and LGS client with capability discovery, timeouts and an allow list of query types",
-            "parsers per device and version producing pathattr objects rather than strings",
-            "RIB, RIB-in, RIB-out and per-prefix detail queries with one return type",
-            "read only enforcement in the type system, so a caller cannot send a configuration command by accident",
-            "concurrent multi site queries with per site latency and error accounting",
-        ],
-        "nongoals": [
-            "a web front end or the RIB viewer itself; it returns objects you can render",
-            "device configuration or any write path, ever",
-            "generic network automation, which is scrapli, netmiko and napalm territory",
-        ],
-        "mods": [
-            ("protocol", "LGC and LGS framing, request types and progress reporting"),
-            ("transport", "HTTP, SSH and raw TCP backends with budgets and host keys"),
-            ("parsers", "per vendor and version output conversion into typed objects"),
-            (
-                "query",
-                "the typed query surface: rib, ribin, ribout, detail, traceroute",
-            ),
-            ("sites", "registry of looking glasses with capabilities and health"),
-            ("guard", "read only enforcement and an explicit allow list"),
-            ("federation", "concurrent queries across sites with per site accounting"),
-        ],
-        "api": [
-            ("protocol", "def", "encode_request", "query: Query", "bytes", "design"),
-            ("protocol", "def", "decode_response", "raw: bytes", "Response", "design"),
-            (
-                "transport",
-                "async def",
-                "call",
-                "site: Site, query: Query, budget: Budget",
-                "Response",
-                "design",
-            ),
-            (
-                "parsers",
-                "def",
-                "parse_rib",
-                "text: str, flavour: str",
-                "list",
-                "RFC 4271",
-            ),
-            (
-                "query",
-                "async def",
-                "rib",
-                "site: Site, prefix: str",
-                "list",
-                "RFC 4271",
-            ),
-            (
-                "query",
-                "async def",
-                "detail",
-                "site: Site, prefix: str",
-                "list",
-                "RFC 4271",
-            ),
-            ("guard", "def", "assert_read_only", "query: Query", "None", "design"),
-            (
-                "federation",
-                "async def",
-                "query_many",
-                "sites: list, query: Query",
-                "list",
-                "design",
-            ),
-        ],
-        "steps": [
-            "M1 the query and result model plus read only enforcement",
-            "M2 LGS and LGC transport with capability discovery",
-            "M3 FRR and BIRD parsers with captured fixtures per version",
-            "M4 SSH and HTTP backends with host key pinning",
-            "M5 multi site federation with per site accounting",
-            "M6 publication: 0.1.0 with a worked example composing rpkit state",
-        ],
-        "extras": {"codec": [("pathattr", "0.1")]},
-        "cli": "lgc query --site route-server-example --prefix 1.2.3.0/24 --detail --json",
-    },
-]
-ALL_PROJECTS = (
-    PROJECTS_A
-    + PROJECTS_B
-    + PROJECTS_C
-    + PROJECTS_D
-    + PROJECTS_E
-    + PROJECTS_F
-    + PROJECTS_G
-    + PROJECTS_H
-    + PROJECTS_I
-)
 # ---------------------------------------------------------------------------
 # Part 19: agent instruction files (AGENTS.md + .clinerules + a Cline workflow)
 #
@@ -6829,7 +1664,10 @@ ALL_PROJECTS = (
 #     Linux Foundation) is plain Markdown with no required fields. Nested files
 #     are resolved by nearest-file precedence, and an explicit prompt in chat
 #     overrides all of it. That makes a workspace-level file plus one per project
-#     the right shape for a directory of sibling repositories.
+#     the right shape for a directory of sibling repositories. The workspace file,
+#     AGENTS.md at the workspace root, is maintained by hand and is not written from here: the
+#     generator once replaced its 4436 characters with a 2517-character template
+#     on every run, which is the kind of loss the ownership guard below exists to stop.
 #   * Cline reads AGENTS.md, ~/.agents/AGENTS.md, .clinerules/ and .cline/rules/,
 #     combining the files found in a rules directory. Conditional rules take a
 #     `paths:` glob in YAML front matter and activate when a matching file is in
@@ -6841,54 +1679,6 @@ ALL_PROJECTS = (
 #     below is therefore commands, invariants and errata pointers; module lists,
 #     dependencies and design prose stay in README.md and docs/.
 # ---------------------------------------------------------------------------
-
-
-AGENTS_WORKSPACE = r'''# Instructions for coding agents
-
-`D:\code` is a workspace of sibling projects, not a repository. Each subdirectory
-is its own git repository, and the workspace root has no git history.
-
-## Rules that apply everywhere
-
-- Never run a formatter, linter or cache cleaner from this directory. A recursive
-  `ruff format .` started here rewrites every unrelated project in the workspace.
-  Change into the project directory first, and pass paths relative to it.
-- If a test result or a type-check error contradicts the file you just read, clear
-  `__pycache__` and re-run before believing it. Bytecode is validated by
-  second-resolution mtime plus size, so a regenerated file of identical length can
-  look unchanged to the interpreter.
-- For any protocol question, use the `rfclib` MCP tools. Never state an RFC number,
-  section number or normative wording from memory: the spine is recorded in each
-  project's `docs/rfc-map.md`, and `rfclib.info` confirms status and successor.
-- Python is 3.12 or newer. `from __future__ import annotations` at the top, ABCs
-  from `collections.abc`, `X | None` rather than `Optional[X]`, and
-  `datetime.UTC` rather than `datetime.timezone.utc`.
-- Let `ruff format` decide line breaks. Do not wrap comments by hand.
-- Commit messages take no `Co-Authored-By` trailer or any other AI attribution,
-  even though older commits in some of these repositories have one.
-
-## Inside a project
-
-Each project directory has its own `AGENTS.md` with the commands and the invariants that
-apply there. That file takes precedence over this one for work in that project, so read it
-before editing.
-
-## Plan directories are not projects
-
-`certledger/` and `keyproof/` hold plans, trust models and
-conformance-corpus specifications. They have no package, no `pyproject.toml` and no test
-suite, so **there is no command in them that will run**. If a task asks for work there, the
-deliverable is a document or a decision, not scaffolding: creating a `pyproject.toml` in a
-plan directory ahead of its wave turns a plan into a shell nobody maintains, which is the
-failure mode `PORTFOLIO.md` section 7 exists to prevent.
-
-`PORTFOLIO.md` at this root is the authority on sequencing - which projects are worked on, in
-what order, and what is deliberately not built. Each generated project also carries
-`docs/plan.md` recording its tier, its wave and the dependencies that block it. When a plan
-says a dependency "does not exist yet", that means blocked, and work on the dependent project
-should not start.
-
-'''
 
 
 AGENTS_PROJECT = '''# Instructions for coding agents
@@ -6918,11 +1708,13 @@ and Windows, plus the suite under `python -O`.
 These are the points where a plausible-looking change makes the project wrong
 rather than merely incomplete.
 
-1. **Roadmap honesty.** Never change a `ROADMAP.md` row from `[ ]` to `[x]` unless
-   the test named in its `Evidence` cell exists and passes. `tests/test_roadmap_rows.py`
-   fails on any row that claims done without a named test, and that check is the
-   reason the roadmap can be trusted. Do not weaken it, skip it, or delete it to
-   get a green run.
+1. **Roadmap honesty.** Never change a `ROADMAP.md` row from `[ ]` to `[ok]` unless
+   the test named in its `Where` cell exists, passes, and would fail if the behaviour
+   regressed. A Where cell marked `(to be written)` names a test nobody has written:
+   write it, then drop the marker in the same commit that flips the row.
+   `tests/test_roadmap_rows.py` checks only that every row names a callable the
+   package defines; it cannot tell a passing test from a missing one, so this rule
+   is the check. Do not weaken that test, skip it, or delete it to get a green run.
 2. **No silent stubs.** Code that is not implemented raises `NotImplementedError`.
    Never return an empty value, an empty collection, or a result object that reports
    success. A protocol library that answers nothing is worse than one that refuses
@@ -7037,9 +1829,6 @@ Implement the next unchecked row of `ROADMAP.md` in this project, working from
 7. Commit with the citation from `rfclib.cite` in the message body. No
    `Co-Authored-By` trailer.
 '''
-
-
-WORKSPACE_WRITTEN = []
 
 
 def sub(text, mapping):
@@ -7187,36 +1976,6 @@ def agents_files(p):
     }
 
 
-def write_agent_text(path, text):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = textwrap.dedent(text).strip() + chr(10)
-    path.write_text(body, encoding="utf-8", newline="")
-
-
-_ORIG_BUILD = build
-
-
-def build(p):
-    count = _ORIG_BUILD(p)
-    if not WORKSPACE_WRITTEN:
-        write_agent_text(ROOT / "AGENTS.md", AGENTS_WORKSPACE)
-        WORKSPACE_WRITTEN.append(True)
-    root = ROOT / p["name"]
-    for relative, text in agents_files(p).items():
-        write_agent_text(root / relative, text)
-        count += 1
-    return count
-
-
-# This file used to be assembled from parts/partNN.py by numeric concatenation, and the comment that
-# stood here explained why no __main__ guard appeared at this point in the middle of the file: the
-# guard had to live in the last part, because a guard placed earlier would call run() before the
-# wrappers that follow had reassigned build, and every artefact those parts owned would silently stop
-# being written. parts/ was deleted on 2026-11-07 as a stale second copy of these same template strings
-# - forge.py never read it, and the duplication had already caused a near-edit of one copy and not the
-# other. The concatenation order is still the reason the guard sits at the very end: keep it there.
-# Recover the original parts from git history if the assembly is ever needed again.
-
 # ---------------------------------------------------------------------------
 # Part 20: portfolio position (docs/plan.md)
 #
@@ -7234,137 +1993,7 @@ def build(p):
 # until asn1core exists no certificate-shaped project can ship behaviour. Every
 # plan that cites asn1core repeats that sentence, because a caveat kept in one
 # file nobody opens is a caveat that gets planned around.
-#
-# This part also owns the __main__ guard, moved from part 19: it has to run
-# after every wrapper in the build chain has been installed, so the last part
-# is the one that calls run().
 # ---------------------------------------------------------------------------
-
-# name -> (tier, wave, hard dependencies). Transcribed from PORTFOLIO.md
-# sections 4 and 6; an arrow means "cannot deliver behaviour without".
-POSITION = {
-    # Tier 1, wave 1: the chokepoint itself.
-    "rpkit": (1, 1, ("asn1core",)),
-    # Tier 2, wave 2: the certificate cluster.
-    "ctspy": (2, 2, ("asn1core",)),
-    "pkix": (2, 2, ("asn1core",)),
-    "revokekit": (2, 2, ("asn1core", "pkix")),
-    # Tier 2, wave 2: the routing-security cluster, anchored on rpkit.
-    "rtrkit": (2, 2, ("rpkit",)),
-    "routevalid": (2, 2, ("rpkit", "rtrkit")),
-    # Tier 2, wave 4: naming and address allocation.
-    "dnssd-srp": (2, 4, ("namespy",)),
-    "leasespy": (2, 4, ()),
-    # Tier 3, wave 3: the routing-operations story.
-    "asnkit": (3, 3, ("rpkit", "rtrkit")),
-    "bgpfeed": (3, 3, ("asnkit",)),
-    # Tier 3, wave 3: solid gaps with no dependency in front of them.
-    "rpslkit": (3, 3, ()),
-    "bmpkit": (3, 3, ()),
-    "pathattr": (3, 3, ()),
-    "lgc": (3, 3, ()),
-    "turnkit": (3, 3, ()),
-    "ohttp": (3, 3, ()),
-    "h3tunnel": (3, 3, ()),
-    "sfields": (3, 3, ()),
-    "syslogkit": (3, 3, ()),
-    # Tier 3, wave 2: certificate-shaped, so gated on the substrate.
-    "signeddata": (3, 2, ("asn1core",)),
-    # Tier 4, wave 5: the rest, in tier order, one at a time.
-    "ntspy": (4, 5, ()),
-    "tacacs": (4, 5, ()),
-    "pgpenv": (4, 5, ("asn1core",)),
-    "enrollkit": (4, 5, ("asn1core", "pkix")),
-    "shaken": (4, 5, ("asn1core",)),
-    "srtpkit": (4, 5, ("asn1core",)),
-    "cwmp": (4, 5, ()),
-    "devicespy": (4, 5, ()),
-}
-
-TIER_NOTE = {
-    1: "Tier 1 is work on now: its absence hurts, and finishing it makes several "
-       "other projects cheaper.",
-    2: "Tier 2 is next: high value, and each entry needs something from Tier 1 "
-       "before it can produce behaviour.",
-    3: "Tier 3 is planned: a solid gap with no urgency, and better work once "
-       "Tier 1 exists.",
-    4: "Tier 4 is hold: a real protocol with a weaker case for now, whether "
-       "through adequate incumbents, a narrow audience or a long dependency chain.",
-}
-
-WAVE_NOTE = {
-    1: "the chokepoint and the ambient-trust hole",
-    2: "the first real answer",
-    3: "the routing-operations story",
-    4: "naming and address allocation",
-    5: "the rest in tier order, one at a time",
-}
-
-
-# One sentence per edge, on why the arrow is a hard dependency rather than a
-# preference. Keyed by (project, dependency).
-DEPENDS_WHY = {
-    ("rpkit", "asn1core"): "every RPKI signed object rpkit fetches is a CMS structure "
-                         "that has to be decoded from the bytes it arrived as before "
-                         "its signature means anything, and that codec is asn1core's job",
-    ("ctspy", "asn1core"): "a signed certificate timestamp and a Merkle leaf are verified "
-                         "over encoded bytes, so an inclusion proof is only as good as "
-                         "a codec that keeps the original bytes instead of re-encoding "
-                         "them",
-    ("pkix", "asn1core"): "RFC 5280 section 6 validates paths over certificates and CRLs, "
-                        "and RFC 5280 section 4.1.3.2 checks the CA signature over the "
-                        "DER encoding of the TBSCertificate, so validation cannot be "
-                        "written above a codec that re-encodes what it parsed",
-    ("revokekit", "asn1core"): "an OCSP response is a signed DER object and a CRL is DER "
-                             "all the way down, so a revocation answer that cannot be "
-                             "re-derived from the bytes it arrived in is not an answer",
-    ("revokekit", "pkix"): "deciding whether a responder may sign for a CA is path "
-                           "validation against the same trust anchors pkix already "
-                           "resolves, and a second validator here would only disagree "
-                           "with the first",
-    ("rtrkit", "rpkit"): "RTR announces what has been validated, so the serial "
-                         "discipline of a cache server is worth nothing unless the "
-                         "assertions underneath it came from rpkit's repository fetch "
-                         "and signed-object checks",
-    ("routevalid", "rpkit"): "a validity verdict is an RPKI assertion plus its anchor, "
-                             "and rpkit is the only thing in this portfolio that fetches "
-                             "and validates the repository content",
-    ("routevalid", "rtrkit"): "what a router was actually told to believe is the RTR "
-                              "stream, and without it there is no live state to join a "
-                              "RIB dump or an observed AS path against",
-    ("dnssd-srp", "namespy"): "SRP is unicast DNS with authenticated updates and pushed "
-                              "record changes, so the message codec, the iterative "
-                              "resolver and the DNSSEC, DoT and DoH legs are namespy's "
-                              "and are shared rather than rebuilt",
-    ("asnkit", "rpkit"): "the question asnkit answers is which AS, on which date, and "
-                         "what did RPKI say about it, and the last clause is an rpkit "
-                         "assertion rather than anything derivable from a RIB dump",
-    ("asnkit", "rtrkit"): "validation state is joined at query time from the RTR feed "
-                          "rtrkit holds, because a prefix's history with no state "
-                          "announced for it is a lookup with no answer attached",
-    ("bgpfeed", "asnkit"): "a feed is a stream of UPDATE records until its prefixes "
-                           "resolve to an AS with a date and a validation state, which "
-                           "is the lookup asnkit owns",
-    ("signeddata", "asn1core"): "CMS is a DER container end to end - SignedData, "
-                              "EnvelopedData and AuthenticatedData, their attribute "
-                              "sets, and the issuer and serial that identifies a signer "
-                              "- so the encoding layer underneath is not this project's",
-    ("enrollkit", "asn1core"): "CMP messages, CRMF requests and PKCS#10 are all DER, and a "
-                             "request whose encoding changes on the way to the CA is an "
-                             "enrollment for a different key",
-    ("enrollkit", "pkix"): "an issued certificate is only useful once it validates to a "
-                           "trust anchor, and that verdict belongs to pkix rather than "
-                           "being restated at the end of an enrollment flow",
-    ("pgpenv", "asn1core"): "OpenPGP bindings reach X.509 identities through encoded key "
-                          "material, and pgpenv is scoped to packets and keys, so "
-                          "reading the DER under a key belongs to asn1core",
-    ("shaken", "asn1core"): "a PASSporT is only as trustworthy as the certificate the "
-                          "originating provider publishes at its x5u, and parsing that "
-                          "certificate is asn1core's job, not shaken's",
-    ("srtpkit", "asn1core"): "RFC 5764 key establishment presents certificates, and SRTP "
-                           "keys are only as strong as the identity that negotiated "
-                           "them, so certificate parsing stays in asn1core",
-}
 
 # How to state each dependency's current existence, keyed by what deps.py finds on the disk. This used to
 # be a static table, and its asn1core entry ("does not exist yet") outlived the fact: asn1core gained a
@@ -7415,17 +2044,10 @@ def dep_state(dep):
     return deps.dependency_state(ROOT, dep).state
 
 
-# Edges the portfolio plan records as candidate rather than load-bearing.
-CANDIDATE_EDGES = {("dnssd-srp", "namespy")}
-CANDIDATE_NOTE = (
-    "This edge is recorded as a candidate: the message layer and the resolver are shared "
-    "with namespy, and the stateful half - SRP updates, registrar checks and pushed "
-    "record changes - is what is built here."
-)
-
 INTRO = (
-    "This file is generated by sdk-forge/forge.py from the portfolio plan, and a hand "
-    "edit here is overwritten at the next run. Two documents govern this project and "
+    "This file is generated by sdk-forge/forge.py from the portfolio plan. Change the "
+    "plan, not this file: a hand edit here is never overwritten, but it stops the "
+    "generator from updating the file at all. Two documents govern this project and "
     "they govern different things: the obligation table in "
     "[../ROADMAP.md](../ROADMAP.md) governs protocol work - which rows exist, and what "
     "evidence closes one - and this file governs sequencing, which is which wave this "
@@ -7468,18 +2090,6 @@ SHELL_NOTE = (
     "@AGREE@ a directory, CI and an obligation table, and no behaviour, so work here can "
     "be designed against such a dependency and cannot be finished against it."
 )
-
-RULES = [
-    "At most two projects in the portfolio carry real effort at once. A third is not "
-    "started, and no obligation is taken here, while those two are open.",
-    "No new shell is created while any Tier 1 project still has an unimplemented "
-    "obligation. Twenty-eight generated READMEs are already the maintenance liability, "
-    "and the failure mode of this portfolio is prose outrunning code rather than "
-    "under-building.",
-    "A project freezes to Tier 4 when its first release finds no external user, and a "
-    "shell is retired publicly when a competitor ships what it promised rather than left "
-    "to rot - the retirement is announced, not a README quietly left to go stale.",
-]
 
 POINTER = (
     "Protocol facts come from docs/rfc-map.md and the RFC Editor record, never from "
@@ -7539,8 +2149,18 @@ def depends_block(name):
     return "\n\n".join(blocks)
 
 
+def shell_count():
+    """How many generated projects are still shells, read from the workspace rather than written in.
+
+    The rule below used to say "Twenty-eight generated READMEs" as a literal, and it stayed twenty-eight
+    after ctspy stopped being a shell.
+    """
+    return sum(1 for name in PROJECT_ORDER if dep_state(name) == "shell")
+
+
 def rules_block():
-    return "\n".join(bullet(rule) for rule in RULES)
+    count = shell_count()
+    return "\n".join(bullet(subs(rule, {"SHELLS": count})) for rule in RULES)
 
 
 def render_plan(p):
@@ -7569,33 +2189,393 @@ def render_plan(p):
     ).strip() + "\n"
 
 
-def write_plan(path, text):
-    """Write one generated document as ASCII text with LF endings."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------------------------
+# The pipeline: render, polish, decide who owns each file, then write or report
+#
+# One function renders every file a project gets, so there is one place that says what the generator
+# writes. It replaces a chain in which build() was reassigned three times, each wrapper calling the one
+# before it, so the write set had to be traced through the module to be known - and the first wrapper
+# wrote D:\code\AGENTS.md as a side effect of building whichever project came first.
+#
+# Nothing reaches the disk without passing decide(), which applies D17 of docs/improvement-plan.md: the
+# generator stops owning a file when the file differs from what the generator last wrote there, when
+# the project's ROADMAP.md has a done row, or when a module has no NotImplementedError left. Measured
+# before this existed, one unguarded run would have turned ctspy's sct.py from 8174 bytes of
+# implementation into a 1398-byte stub and dropped its six [ok] rows. docs/plan.md is exempt from the
+# done-row rule only: it holds no hand work, and the cost D17 names for a stricter rule is exactly that
+# implemented projects would stop getting their position regenerated.
+#
+# What the generator last wrote is the manifest, forge_data/generated.json: a SHA-256 per project and
+# path, recorded after every write. A file with no record was written before the manifest existed, so
+# nothing says whether it was edited since. Such a file is kept, and reported, unless --adopt is given
+# (the operator has checked it is untouched generator output) or it is a docs/plan.md that still
+# carries its own "this file is generated" header.
+# ---------------------------------------------------------------------------
+
+MANIFEST = pathlib.Path(
+    os.environ.get("FORGE_MANIFEST") or HERE / "forge_data" / "generated.json"
+)
+WORKSPACE = "."  # the manifest key for files at the workspace root rather than in a project
+INDEX = "protocol-sdks.md"
+PLAN_MARKER = "This file is generated by sdk-forge/forge.py"
+KINDS = (
+    "plan",
+    "roadmap",
+    "readme",
+    "pyproject",
+    "package",
+    "tests",
+    "agents",
+    "extras",
+    "license",
+    "index",
+)
+WRITES = ("create", "update")
+# Files D17 made hand-owned by name, whatever the rules below would decide: these matrices are maintained
+# by hand now, and a --adopt must not be able to hand them back to the generator by accident.
+HAND_OWNED = {("pkix", "ROADMAP.md"), ("ctspy", "ROADMAP.md")}
+
+
+def managed_bytes(text: str) -> bytes:
+    """Managed text as ASCII prose with LF endings and one trailing newline."""
+    body = textwrap.dedent(ascii_prose(text)).strip("\n") + "\n"
+    return body.replace("\r\n", "\n").encode()
+
+
+def agent_bytes(text: str) -> bytes:
+    """An agent instruction file: dedented, stripped, one trailing newline."""
+    return (textwrap.dedent(text).strip() + "\n").encode("utf-8")
+
+
+def plan_bytes(text: str) -> bytes:
+    """docs/plan.md as ASCII text with LF endings."""
     body = ascii_prose(text).replace("\r\n", "\n")
     if not body.endswith("\n"):
         body += "\n"
-    path.write_text(body, encoding="utf-8", newline="\n")
+    return body.encode("utf-8")
 
 
-# Captured under a part-specific name. Every part lands in one module namespace,
-# so reusing part 19's `_ORIG_BUILD` here would rebind the name part 19's wrapper
-# reads and make the two wrappers call each other forever.
-_BUILD_BEFORE_POSITIONS = build
+def kind_of(rel: str, p: dict[str, Any]) -> str:
+    """Which --only kind a generated path belongs to."""
+    named = {
+        "docs/plan.md": "plan",
+        "ROADMAP.md": "roadmap",
+        "README.md": "readme",
+        "pyproject.toml": "pyproject",
+        "LICENSE": "license",
+        "AGENTS.md": "agents",
+        "conftest.py": "package",
+    }
+    if rel in named:
+        return named[rel]
+    if rel.startswith((".clinerules/", ".cline/")):
+        return "agents"
+    if rel.startswith("tests/"):
+        return "tests"
+    if rel.startswith(p["pkg"] + "/"):
+        return "package"
+    return "extras"
 
 
-def build(p):
-    count = _BUILD_BEFORE_POSITIONS(p)
-    name = p["name"]
-    # Loud rather than skipped: a project with no row here is a project whose wave
-    # nobody decided, and quietly omitting its plan.md is how a portfolio document
-    # starts lying about the work.
-    if name not in POSITION:
-        raise KeyError(name + ": no POSITION row, so its tier and wave are undecided")
-    write_plan(ROOT / name / "docs" / "plan.md", render_plan(p))
-    return count + 1
+def render_plan_file(p: dict[str, Any]) -> dict[str, bytes]:
+    """docs/plan.md alone. It reads the workspace, so the pipeline renders it after the other files."""
+    p = normalize(p)
+    if p["name"] not in POSITION:
+        # Loud rather than skipped: a project with no row is a project whose wave nobody decided.
+        raise KeyError(p["name"] + ": no POSITION row, so its tier and wave are undecided")
+    return {"docs/plan.md": plan_bytes(render_plan(p))}
 
 
+def render_project(p: dict[str, Any], plan: bool = True) -> dict[str, bytes]:
+    """Every file the generator owns in one project, as the bytes it would write."""
+    p = normalize(p)
+    if p["name"] not in POSITION:
+        raise KeyError(p["name"] + ": no POSITION row, so its tier and wave are undecided")
+    texts = {
+        "pyproject.toml": render_pyproject(p),
+        "README.md": render_readme(p),
+        "ROADMAP.md": render_roadmap(p),
+    }
+    texts.update(render_extras(p))
+    texts.update(render_package(p))
+    texts.update(render_tests(p))
+    files = {rel: managed_bytes(text) for rel, text in texts.items()}
+    files["LICENSE"] = LICENSE_SRC.read_bytes()
+    for rel, text in agents_files(p).items():
+        files[rel] = agent_bytes(text)
+    if plan:
+        files.update(render_plan_file(p))
+    return files
+
+
+def polish(name: str, files: dict[str, bytes]) -> tuple[dict[str, bytes], list[str]]:
+    """Run the formatter and the import fixes over the generated Python, in a scratch copy.
+
+    The formatter and the import/name fixes are mechanical, so the generator runs the tools a
+    contributor would instead of reimplementing them. They run on a staged copy of the generated files
+    only: the old polish ran `ruff format .` inside the project, which reformatted hand-written files
+    the generator never owned, and a dry run could not have used it at all. A tool failure is reported
+    rather than raised, because the verification run is the authority.
+    """
+    python = sorted(rel for rel in files if rel.endswith(".py"))
+    if not python:
+        return files, []
+    notes = []
+    out = dict(files)
+    with tempfile.TemporaryDirectory(prefix="forge-") as tmp:
+        stage = pathlib.Path(tmp) / name
+        for rel in [*python, "pyproject.toml"]:
+            if rel in files:
+                (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+                (stage / rel).write_bytes(files[rel])
+        for cmd in (
+            ["-m", "ruff", "format", "--no-cache"],
+            ["-m", "ruff", "check", "--no-cache", "--fix", "--select", "I001,F401,RUF022"],
+        ):
+            try:
+                done = subprocess.run(
+                    [sys.executable, *cmd, *python],
+                    cwd=str(stage),
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except OSError as error:  # the tool is missing; verification will say so loudly
+                notes.append(name + ": " + cmd[2] + " could not run: " + str(error))
+                continue
+            if done.returncode != 0:
+                tail = (done.stdout or done.stderr or "").strip().splitlines()[-1:]
+                notes.append(
+                    name
+                    + ": "
+                    + " ".join(cmd[1:])
+                    + " exited "
+                    + str(done.returncode)
+                    + (" :: " + tail[0] if tail else "")
+                )
+        for rel in python:
+            out[rel] = (stage / rel).read_bytes()
+    return out, notes
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def load_manifest() -> dict[str, dict[str, str]]:
+    if not MANIFEST.is_file():
+        return {}
+    return json.loads(MANIFEST.read_text(encoding="utf-8"))
+
+
+def save_manifest(manifest: dict[str, dict[str, str]]) -> None:
+    MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(manifest, indent=1, sort_keys=True) + "\n"
+    MANIFEST.write_bytes(text.encode("utf-8"))
+
+
+def done_rows(name: str) -> int:
+    """How many rows of the project's ROADMAP.md read done, on the parsing contract deps.py uses."""
+    import deps  # lazy, as in dep_state
+
+    return deps.dependency_state(ROOT, name).rows_done
+
+
+@dataclasses.dataclass(frozen=True)
+class Decision:
+    """What the pipeline does with one generated file, and why."""
+
+    project: str
+    rel: str
+    action: str  # create | update | unchanged | keep
+    reason: str
+    data: bytes
+    current: bytes | None
+
+
+def decide(
+    project: str,
+    root: pathlib.Path,
+    files: dict[str, bytes],
+    kinds: dict[str, str],
+    recorded: dict[str, str],
+    adopt: bool = False,
+) -> list[Decision]:
+    """Apply the D17 ownership rule to each generated file of one project. Reads only."""
+    done = done_rows(project) if project != WORKSPACE else 0
+    out = []
+    for rel, data in files.items():
+        path = root / rel
+        kind = kinds[rel]
+        current = path.read_bytes() if path.is_file() else None
+        hand_owned_project = done and kind != "plan"
+        if current == data:
+            action, reason = "unchanged", ""
+        elif (project, rel) in HAND_OWNED:
+            action, reason = "keep", "hand-owned by decision D17"
+        elif hand_owned_project:
+            action = "keep"
+            reason = "ROADMAP.md has " + str(done) + " done row(s), so the project is hand-owned"
+        elif current is None:
+            action, reason = "create", ""
+        elif (
+            kind == "package"
+            and b"NotImplementedError" in data
+            and b"NotImplementedError" not in current
+        ):
+            action, reason = "keep", "no NotImplementedError left: the module is implemented"
+        elif rel in recorded:
+            if sha(current) == recorded[rel]:
+                action, reason = "update", ""
+            else:
+                action, reason = "keep", "edited since the generator last wrote it"
+        elif kind == "plan" and PLAN_MARKER in " ".join(current.decode("utf-8", "replace").split()):
+            action, reason = "update", "unrecorded, but it carries the generated-file header"
+        elif adopt:
+            action, reason = "update", "unrecorded, adopted as generator output by --adopt"
+        else:
+            action = "keep"
+            reason = "unrecorded: nothing says it is unedited generator output (--adopt takes it over)"
+        out.append(Decision(project, rel, action, reason, data, current))
+    return out
+
+
+def unified(decision: Decision) -> str:
+    before = (decision.current or b"").decode("utf-8", "replace").splitlines(keepends=True)
+    after = decision.data.decode("utf-8", "replace").splitlines(keepends=True)
+    label = decision.project + "/" + decision.rel
+    return "".join(difflib.unified_diff(before, after, "a/" + label, "b/" + label))
+
+
+def apply(decisions: list[Decision], root: pathlib.Path, recorded: dict[str, str]) -> int:
+    """Write what decide() allowed and record it. Kept files are neither written nor recorded."""
+    written = 0
+    for decision in decisions:
+        if decision.action in WRITES:
+            path = root / decision.rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(decision.data)
+            written += 1
+        if decision.action in (*WRITES, "unchanged"):
+            recorded[decision.rel] = sha(decision.data)
+    return written
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="forge.py",
+        description="Generate the protocol SDK shells. Files the generator no longer owns are kept.",
+    )
+    parser.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="build only this project (repeatable, or comma-separated); the index is then skipped",
+    )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="KIND",
+        help="write only these kinds of file (repeatable, or comma-separated): " + ", ".join(KINDS),
+    )
+    parser.add_argument(
+        "--check",
+        "--dry-run",
+        dest="check",
+        action="store_true",
+        help="write nothing; list what would change and exit 1 if anything would",
+    )
+    parser.add_argument(
+        "--diff", action="store_true", help="with --check, also print a unified diff of each change"
+    )
+    parser.add_argument(
+        "--adopt",
+        action="store_true",
+        help="take over files with no manifest record, after checking they are unedited",
+    )
+    args = parser.parse_args(argv)
+    args.project = [n for item in args.project for n in item.split(",") if n]
+    args.only = [k for item in args.only for k in item.split(",") if k]
+    unknown = sorted(set(args.only) - set(KINDS))
+    if unknown:
+        parser.error("unknown --only kind: " + ", ".join(unknown))
+    names = {p["name"] for p in ALL_PROJECTS}
+    missing = sorted(set(args.project) - names)
+    if missing:
+        parser.error("not a generated project: " + ", ".join(missing))
+    if args.adopt and not args.project:
+        # Adoption asserts that files nobody recorded are unedited, which someone has to have checked
+        # project by project; a workspace-wide --adopt is that assertion made about everything at once.
+        parser.error("--adopt needs --project: check each project's files before adopting them")
+    return args
+
+
+def run(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    kinds = set(args.only or KINDS)
+    chosen = [p for p in ALL_PROJECTS if not args.project or p["name"] in args.project]
+    manifest = load_manifest()
+    decisions: list[Decision] = []
+    notes: list[str] = []
+    written = 0
+
+    def settle(name: str, root: pathlib.Path, files: dict[str, bytes], kind: dict[str, str]) -> None:
+        nonlocal written
+        recorded = manifest.setdefault(name, {})
+        found = decide(name, root, files, kind, recorded, adopt=args.adopt)
+        decisions.extend(found)
+        if not args.check:
+            written += apply(found, root, recorded)
+
+    # Two passes. docs/plan.md states what the workspace shows - which dependencies are shells, how
+    # many shells there are - so it is rendered after the pass that writes the other files, and one
+    # run converges instead of describing the workspace as it was before the run.
+    if kinds - {"plan"}:
+        for p in chosen:
+            files = render_project(p, plan=False)
+            kind = {rel: kind_of(rel, p) for rel in files}
+            wanted = [rel for rel in files if kind[rel] in kinds]
+            if any(rel.endswith(".py") for rel in wanted):
+                files, polish_notes = polish(p["name"], files)
+                notes += polish_notes
+            settle(p["name"], ROOT / p["name"], {r: files[r] for r in wanted}, kind)
+    if "plan" in kinds:
+        for p in chosen:
+            settle(p["name"], ROOT / p["name"], render_plan_file(p), {"docs/plan.md": "plan"})
+    if not args.project and "index" in kinds:
+        settle(WORKSPACE, ROOT, {INDEX: managed_bytes(render_index(ALL_PROJECTS))}, {INDEX: "index"})
+    manifest = {name: rec for name, rec in manifest.items() if rec}
+    if not args.check:
+        save_manifest(manifest)
+    verb = "would " if args.check else ""
+    for d in decisions:
+        if d.action == "unchanged":
+            continue
+        shown = d.action if d.action == "keep" else verb + d.action
+        print(shown + " " + d.project + "/" + d.rel + (" - " + d.reason if d.reason else ""))
+        if args.check and args.diff and d.action in WRITES:
+            print(unified(d), end="")
+    changes = sum(1 for d in decisions if d.action in WRITES)
+    kept = sum(1 for d in decisions if d.action == "keep")
+    print(
+        "projects "
+        + str(len(chosen))
+        + ", files "
+        + str(len(decisions))
+        + ", "
+        + (verb + "change " if args.check else "written ")
+        + str(changes if args.check else written)
+        + ", kept "
+        + str(kept)
+    )
+    for note in notes:
+        print("polish:", note)
+    return 1 if args.check and changes else 0
+
+
+# Kept as the last statement, and test_templates.py checks it: run() must see every definition above.
 if __name__ == "__main__":
     raise SystemExit(run())
-

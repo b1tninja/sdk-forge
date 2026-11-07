@@ -11,9 +11,15 @@ stall the whole pass.
 
 from __future__ import annotations
 
+import argparse
+import datetime
+import importlib.metadata
+import json
 import os
 import subprocess
 import sys
+import tempfile
+import xml.etree.ElementTree as ET  # noqa: N817
 from pathlib import Path
 
 ROOT = Path(os.environ.get("FORGE_ROOT") or "D:/code")
@@ -99,13 +105,109 @@ def qualifies(name: str) -> Path | None:
     return None
 
 
-def main() -> int:
+def refuse_path(path: Path) -> str:
+    """Why `path` may not hold an evidence record, or "" if it may.
+
+    Inside the workspace or inside any git work tree, a results file is one `git add -A` away from being
+    committed as if it were source, which this workspace has already had to amend out once (AGENTS.md).
+    """
+    target = path.resolve()
+    if target == ROOT.resolve() or ROOT.resolve() in target.parents:
+        return f"{target} is inside the workspace {ROOT}; write evidence outside it"
+    probe = next((p for p in [target, *target.parents] if p.is_dir()), None)
+    if probe is not None:
+        done = subprocess.run(  # noqa: S603, S607
+            ["git", "-C", str(probe), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        if done.returncode == 0:
+            return f"{target} is inside the git work tree {done.stdout.strip()}"
+    return ""
+
+
+def node_ids(junit: Path, cwd: Path) -> list[dict[str, object]]:
+    """pytest node ids and outcomes from a JUnit XML report, mapped back to file paths under `cwd`."""
+    if not junit.is_file():
+        return []
+    out: list[dict[str, object]] = []
+    for case in ET.parse(junit).getroot().iter("testcase"):  # noqa: S314 - our own pytest's output
+        parts = (case.get("classname") or "").split(".")
+        name = case.get("name") or ""
+        node = name
+        for k in range(len(parts), 0, -1):
+            module = cwd.joinpath(*parts[:k]).with_suffix(".py")
+            if module.is_file():
+                node = "::".join([module.relative_to(cwd).as_posix(), *parts[k:], name])
+                break
+        outcome = "passed"
+        for tag, label in (
+            ("failure", "failed"),
+            ("error", "error"),
+            ("skipped", "skipped"),
+        ):
+            if case.find(tag) is not None:
+                outcome = label
+                break
+        out.append(
+            {
+                "node_id": node,
+                "outcome": outcome,
+                "seconds": float(case.get("time") or 0),
+            }
+        )
+    return sorted(out, key=lambda r: str(r["node_id"]))
+
+
+def _git(cwd: Path, *args: str) -> str:
+    done = subprocess.run(  # noqa: S603, S607
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    return done.stdout.strip() if done.returncode == 0 else ""
+
+
+def tool_versions() -> dict[str, str]:
+    found = {"python": sys.version.split()[0]}
+    for name in ("pytest", "ruff", "mypy"):
+        try:
+            found[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            found[name] = "absent"
+    return found
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--json",
+        metavar="PATH",
+        help="also write an evidence record (commit, gates, every test node and its outcome) to PATH, "
+        "which must be outside the workspace and outside any git work tree",
+    )
+    parser.add_argument(
+        "--project", action="append", help="restrict to this project; repeatable"
+    )
+    args = parser.parse_args(argv)
+    record_path = Path(args.json) if args.json else None
+    if record_path is not None:
+        refusal = refuse_path(record_path)
+        if refusal:
+            print(f"verify: refusing --json: {refusal}", file=sys.stderr)
+            return 2
+    junit_dir = Path(tempfile.mkdtemp(prefix="verify-junit-")) if record_path else None
+    records: list[dict[str, object]] = []
     failures: list[tuple[str, str, str, str]] = []
     counts = {gate: {"OK": 0, "FAIL": 0} for gate in GATES}
     skipped: list[str] = []
     checked = 0
 
-    for name in PROJECTS:
+    for name in args.project or PROJECTS:
         cwd = qualifies(name)
         if cwd is None:
             skipped.append(name)
@@ -114,7 +216,11 @@ def main() -> int:
         pkg = name.replace("-", "_")
         specs = [
             ("compile", ["-m", "compileall", "-q", pkg]),
-            ("pytest", ["-m", "pytest", "-q", "-p", "no:cacheprovider"]),
+            (
+                "pytest",
+                ["-m", "pytest", "-q", "-p", "no:cacheprovider"]
+                + ([f"--junitxml={junit_dir / (name + '.xml')}"] if junit_dir else []),
+            ),
             ("ruff", ["-m", "ruff", "check", "."]),
             ("format", ["-m", "ruff", "format", "--check", "."]),
             ("mypy", ["-m", "mypy", pkg]),
@@ -128,6 +234,22 @@ def main() -> int:
             if status == "FAIL":
                 failures.append((name, gate, out, err))
         print(f"{name} " + " ".join(results), flush=True)
+        if junit_dir is not None:
+            tests = node_ids(junit_dir / f"{name}.xml", cwd)
+            records.append(
+                {
+                    "project": name,
+                    "repo": _git(cwd, "remote", "get-url", "origin"),
+                    "sha": _git(cwd, "rev-parse", "HEAD"),
+                    "dirty": bool(_git(cwd, "status", "--porcelain")),
+                    "gates": {r.split("=")[0]: r.split("=")[1] for r in results},
+                    "tests": tests,
+                    "counts": {
+                        o: sum(1 for x in tests if x["outcome"] == o)
+                        for o in ("passed", "failed", "error", "skipped")
+                    },
+                }
+            )
 
     print()
     print("summary")
@@ -155,6 +277,22 @@ def main() -> int:
                 print(f"--- {label} ({len(lines)} lines{suffix}) ---")
                 for line in lines[:MAX_LINES]:
                     print(line)
+    if record_path is not None:
+        record = {
+            "schema": 1,
+            "generated": datetime.datetime.now(datetime.UTC).isoformat(
+                timespec="seconds"
+            ),
+            "root": str(ROOT),
+            "tool_versions": tool_versions(),
+            "projects": records,
+        }
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        partial = record_path.with_suffix(record_path.suffix + ".partial")
+        partial.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        partial.replace(record_path)
+        nodes = sum(len(r["tests"]) for r in records if isinstance(r["tests"], list))
+        print(f"evidence record: {record_path} ({nodes} test nodes)")
     return 1 if failures else 0
 
 

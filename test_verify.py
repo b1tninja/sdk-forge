@@ -57,3 +57,71 @@ def test_projects_stays_importable_and_covers_every_generated_shell():
 
     assert set(forge.POSITION) <= set(PROJECTS)
     assert "certledger" in PROJECTS
+
+
+JUNIT = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest">
+  <testcase classname="tests.test_merkle" name="test_root" time="0.01"/>
+  <testcase classname="tests.test_merkle.TestProofs" name="test_refuses[2]" time="0.02"><failure message="x"/></testcase>
+  <testcase classname="tests.test_sth" name="test_skip" time="0"><skipped/></testcase>
+</testsuite></testsuites>
+"""
+
+
+def test_node_ids_map_junit_classnames_back_to_files_and_outcomes(tmp_path):
+    (tmp_path / "tests").mkdir()
+    for name in ("test_merkle.py", "test_sth.py"):
+        (tmp_path / "tests" / name).write_text("", encoding="utf-8")
+    report = tmp_path / "r.xml"
+    report.write_text(JUNIT, encoding="utf-8")
+    got = verify.node_ids(report, tmp_path)
+    assert got == [
+        {
+            "node_id": "tests/test_merkle.py::TestProofs::test_refuses[2]",
+            "outcome": "failed",
+            "seconds": 0.02,
+        },
+        {
+            "node_id": "tests/test_merkle.py::test_root",
+            "outcome": "passed",
+            "seconds": 0.01,
+        },
+        {
+            "node_id": "tests/test_sth.py::test_skip",
+            "outcome": "skipped",
+            "seconds": 0.0,
+        },
+    ]
+    assert verify.node_ids(tmp_path / "absent.xml", tmp_path) == []
+
+
+def test_an_evidence_path_inside_the_workspace_or_a_work_tree_is_refused(
+    monkeypatch, tmp_path
+):
+    import subprocess
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setattr(verify, "ROOT", workspace)
+    assert "inside the workspace" in verify.refuse_path(workspace / "out" / "e.json")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    assert "inside the git work tree" in verify.refuse_path(repo / "e.json")
+    outside = tmp_path / "evidence"
+    outside.mkdir()
+    assert verify.refuse_path(outside / "e.json") == ""
+
+
+def test_main_refuses_an_in_tree_record_before_running_anything(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(verify, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        verify,
+        "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran a gate")),
+    )
+    assert verify.main(["--json", str(tmp_path / "e.json")]) == 2
+    assert not (tmp_path / "e.json").exists()
+    assert "refusing --json" in capsys.readouterr().err
